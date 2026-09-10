@@ -70,11 +70,11 @@ func (w *walker) walk(t reflect.Type, path, prefix string, index []int) {
 		fieldPath := path + "." + f.Name
 		fieldIndex := append(slices.Clip(index), i)
 
-		if tag, ok := f.Tag.Lookup("env"); ok && tag == "-" {
+		envTag, hasEnv := f.Tag.Lookup("env")
+		if hasEnv && envTag == "-" {
 			continue
 		}
 
-		envTag, hasEnv := f.Tag.Lookup("env")
 		prefixTag, hasPrefix := f.Tag.Lookup("envPrefix")
 
 		if hasEnv && hasPrefix {
@@ -141,7 +141,7 @@ func (w *walker) walk(t reflect.Type, path, prefix string, index []int) {
 // A struct that parses itself -- time.Time, netip.Addr, any TextUnmarshaler --
 // is a value, not a group, so it is excluded here and handled by decoderFor.
 func isNestedStruct(t reflect.Type) bool {
-	if t == durationType || reflect.PointerTo(t).Implements(textUnmarshalerType) {
+	if reflect.PointerTo(t).Implements(textUnmarshalerType) {
 		return false
 	}
 	switch t.Kind() {
