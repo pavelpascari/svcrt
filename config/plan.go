@@ -14,7 +14,14 @@ type binding struct {
 	env    string // full environment key, prefixes already applied
 	def    string // value from the default: tag
 	hasDef bool   // whether a default: tag was present
-	dec    decoder
+
+	// ptr reports whether the field's own type is a pointer. A pointer's
+	// zero value (nil) already means "not set", so unlike a string or int
+	// there is no need for a default: tag to make it optional -- absence
+	// just leaves the pointer nil.
+	ptr bool
+
+	dec decoder
 }
 
 // block is a *Struct field: an optional group of bindings that is only
@@ -130,6 +137,7 @@ func (w *walker) walk(t reflect.Type, path, prefix string, index []int) {
 			env:    key,
 			def:    def,
 			hasDef: hasDef,
+			ptr:    f.Type.Kind() == reflect.Pointer,
 			dec:    dec,
 		})
 	}

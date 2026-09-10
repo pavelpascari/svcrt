@@ -1,0 +1,3 @@
+config: 2 problems
+  DATABASE_URL (cfg.DBURL): required, not set
+  PORT (cfg.Port): invalid int: parsing "abc": invalid syntax
