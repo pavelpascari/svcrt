@@ -10,7 +10,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 GO_MUTESTING="${GO_MUTESTING:-$HOME/go/bin/go-mutesting}"
-THRESHOLD="${MUTATION_MIN:-0.85}"
 
 # Library modules in dependency order. Add each new one here as it is
 # created; modules not yet present on disk are skipped silently.
@@ -34,6 +33,22 @@ for m in "${MODULES[@]}"; do
   out=$(cd "$m" && "$GO_MUTESTING" ./... 2>&1) || fail "$m: go-mutesting failed to run:
 $out"
 
+  # go-mutesting rewrites a module's source files in place while it mutates
+  # them, restoring the originals when it finishes cleanly -- but it is not
+  # safely interruptible. A run killed mid-mutation (Ctrl-C, a timeout, a
+  # crash) can leave tracked files mutated on disk, plus stray *.tmp files
+  # behind. This has happened for real: an interrupted run once left
+  # config/plan.go and config/source.go mutated with tests still passing
+  # against the corrupted source, one git-add away from being committed.
+  # So: sweep any leftover *.tmp files unconditionally, then verify the
+  # module's tracked files still match HEAD before trusting anything the
+  # run reported. Do not remove this thinking it's defensive paranoia --
+  # it exists because of a real incident, not a hypothetical one.
+  find "$m" -name '*.tmp' -delete
+  if ! git diff --exit-code HEAD -- "$m" > /dev/null; then
+    fail "$m: go-mutesting corrupted the working tree (it rewrites source in place and is not safely interruptible). Restore with: git checkout -- $m"
+  fi
+
   line=$(echo "$out" | grep "The mutation score is" || true)
   [ -n "$line" ] || fail "$m: could not find a mutation score in go-mutesting output:
 $out"
@@ -50,10 +65,19 @@ $out"
     continue
   fi
 
-  echo "$m: mutation score $score, $total mutants total (threshold $THRESHOLD)"
+  # Per-module floor. A small module's equivalent-mutant ceiling can sit below the
+  # global default: logging has 5 provably equivalent mutants out of 25 (documented
+  # in docs/mutation-survivors.md), a hard ceiling of 0.80. The binding rule is that
+  # every survivor is killed or justified there -- this number is only a tripwire.
+  case "$m" in
+    logging) min="${MUTATION_MIN:-0.80}" ;;
+    *)       min="${MUTATION_MIN:-0.85}" ;;
+  esac
 
-  below=$(awk -v s="$score" -v t="$THRESHOLD" 'BEGIN { print (s < t) ? "1" : "0" }')
-  [ "$below" = "0" ] || fail "$m: mutation score $score is below threshold $THRESHOLD"
+  echo "$m: mutation score $score, $total mutants total (threshold $min)"
+
+  below=$(awk -v s="$score" -v t="$min" 'BEGIN { print (s < t) ? "1" : "0" }')
+  [ "$below" = "0" ] || fail "$m: mutation score $score is below threshold $min"
 done
 
 echo "OK"
