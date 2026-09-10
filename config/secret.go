@@ -21,6 +21,9 @@ type Secret string
 // String implements fmt.Stringer, covering %v, %s, and %q.
 func (s Secret) String() string { return "[REDACTED]" }
 
+// GoString implements fmt.GoStringer, covering %#v.
+func (s Secret) GoString() string { return "[REDACTED]" }
+
 // LogValue implements slog.LogValuer, which slog prefers over Stringer.
 func (s Secret) LogValue() slog.Value { return slog.StringValue("[REDACTED]") }
 
