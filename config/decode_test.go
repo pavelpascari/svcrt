@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"net/netip"
 	"reflect"
 	"testing"
@@ -213,6 +214,42 @@ func TestDecodeTextUnmarshalerError(t *testing.T) {
 
 	if _, err := decodeInto[netip.Addr](t, "not-an-ip"); err == nil {
 		t.Error("netip.Addr accepted not-an-ip")
+	}
+}
+
+// decodeText's type-assertion guard is unreachable through decoderFor's own
+// dispatch (it only ever installs decodeText for a type whose pointer
+// implements TextUnmarshaler), but it is directly callable within this
+// package, and a future decoderFor wiring bug could reach it with a dst that
+// does not implement TextUnmarshaler. Without the guard that call falls
+// through to a nil interface method call and panics; with it, a plain error.
+func TestDecodeTextRejectsNonTextUnmarshaler(t *testing.T) {
+	t.Parallel()
+
+	var v int
+	err := decodeText("123", reflect.ValueOf(&v).Elem())
+	if err == nil {
+		t.Fatal("decodeText accepted a non-TextUnmarshaler dst")
+	}
+	want := "internal: int is not a TextUnmarshaler"
+	if err.Error() != want {
+		t.Errorf("err = %q, want %q", err.Error(), want)
+	}
+}
+
+// numError's non-*strconv.NumError branch is unreachable through
+// decoderFor's own dispatch (every caller passes a strconv.Parse* error,
+// which is always a *strconv.NumError), but it is directly callable within
+// this package and is the function's only defined behavior for such an
+// error, so it must stay covered by a direct test rather than left to
+// mutation-survivor bookkeeping.
+func TestNumErrorWrapsNonNumError(t *testing.T) {
+	t.Parallel()
+
+	err := numError("int", errors.New("boom"))
+	want := "invalid int: boom"
+	if err.Error() != want {
+		t.Errorf("err = %q, want %q", err.Error(), want)
 	}
 }
 

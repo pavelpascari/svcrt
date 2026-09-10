@@ -4,37 +4,21 @@ This document records mutants that survive the mutation testing threshold for ea
 
 ## `config` Module
 
-**Mutation Score: above threshold, with 3 surviving mutants -- all
+**Mutation Score: above threshold, with 2 surviving mutants -- both
 justified as equivalent below.** Run `./scripts/mutation.sh config` for the
 current score and mutant total.
 
 Every non-equivalent mutant go-mutesting generates for this module is
-killed by the test suite. The survivors below are re-checked whenever
-`config/decode.go` changes, since a future edit could make one of them
-reachable (e.g. `decoderFor` gaining a second, less careful caller).
-
-### `decode.go`: `decodeText`'s `!ok` type-assertion-failure branch
-
-```go
-u, ok := dst.Addr().Interface().(encoding.TextUnmarshaler)
-if !ok {
-	return fmt.Errorf("internal: %s is not a TextUnmarshaler", dst.Type())
-}
-```
-
-Mutant: replaces the `return` with a no-op, so the branch body does nothing.
-
-`decodeText` is only ever installed as the decoder for a type `t` after
-`decoderFor` has already checked `reflect.PointerTo(t).Implements(textUnmarshalerType)`
-(decode.go, the check just above the kind switch). `dst` passed to a
-built decoder is always addressable and of that same type `t` (see
-`decodeInto` in decode_test.go: `dec(raw, reflect.ValueOf(&v).Elem())`), so
-`dst.Addr()` is always a `*t`, which is guaranteed to implement
-`TextUnmarshaler`. The assertion therefore cannot fail through any call
-path reachable from `decoderFor`, so no input distinguishes the mutant
-from the original -- the branch body is dead by construction, not by
-missing test coverage. Confirmed by attempting to construct a
-distinguishing input: none exists, because `ok` is invariantly `true`.
+killed by the test suite. `decode.go`'s `decodeText` type-assertion guard
+and `numError`'s non-`*strconv.NumError` fallback both look like this
+same "unreachable through decoderFor's own dispatch" shape, but neither
+qualifies as equivalent: both are directly callable within the package
+(`decode_test.go` is `package config`), so both are covered by direct
+tests -- `TestDecodeTextRejectsNonTextUnmarshaler` and
+`TestNumErrorWrapsNonNumError` -- rather than recorded here. Only
+"unreachable through every path, including a direct call" justifies an
+equivalence entry; "unreachable through one caller's dispatch logic" does
+not.
 
 ### `decode.go`: `durationType` literal (`time.Duration(0)` -> `time.Duration(-1)` / `time.Duration(1)`)
 
