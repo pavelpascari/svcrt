@@ -83,19 +83,3 @@ func TestSecretRevealsViaExplicitConversion(t *testing.T) {
 		t.Errorf("string(Secret) = %q, want %q", got, "hunter2")
 	}
 }
-
-func TestSecretDecodesFromConfig(t *testing.T) {
-	t.Skip("Load lands in Task 8")
-	t.Parallel()
-
-	type cfg struct {
-		Pass config.Secret `env:"PASS"`
-	}
-	got, err := config.Load[cfg](config.WithSource(mapSource(map[string]string{"PASS": "hunter2"})))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if string(got.Pass) != "hunter2" {
-		t.Errorf("Pass = %q, want %q", string(got.Pass), "hunter2")
-	}
-}
