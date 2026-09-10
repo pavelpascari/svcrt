@@ -163,3 +163,14 @@ func numError(typeName string, err error) error {
 	}
 	return fmt.Errorf("invalid %s: %w", typeName, err)
 }
+
+// Load is a placeholder stub. Full implementation lands in Task 8.
+func Load[T any](opts ...any) (T, error) {
+	var zero T
+	return zero, fmt.Errorf("Load not yet implemented")
+}
+
+// WithSource is a placeholder stub. Full implementation lands in Task 8.
+func WithSource(src Source) any {
+	return nil
+}
