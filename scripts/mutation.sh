@@ -50,7 +50,7 @@ $out"
     continue
   fi
 
-  echo "$m: mutation score $score (threshold $THRESHOLD)"
+  echo "$m: mutation score $score, $total mutants total (threshold $THRESHOLD)"
 
   below=$(awk -v s="$score" -v t="$THRESHOLD" 'BEGIN { print (s < t) ? "1" : "0" }')
   [ "$below" = "0" ] || fail "$m: mutation score $score is below threshold $THRESHOLD"

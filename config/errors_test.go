@@ -96,3 +96,11 @@ func TestViolationKindString(t *testing.T) {
 		}
 	}
 }
+
+func TestViolationKindStringUnknown(t *testing.T) {
+	t.Parallel()
+
+	if got := config.ViolationKind(99).String(); got != "unknown" {
+		t.Errorf("ViolationKind(99).String() = %q, want %q", got, "unknown")
+	}
+}
