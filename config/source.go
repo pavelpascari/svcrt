@@ -74,7 +74,6 @@ func Dotenv(path string) (Source, error) {
 		}
 
 		key = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(key), "export "))
-		key = strings.TrimSpace(key)
 		if key == "" {
 			return nil, fmt.Errorf("config: dotenv %s: line %d: empty key", path, lineNo)
 		}
@@ -82,9 +81,9 @@ func Dotenv(path string) (Source, error) {
 			return nil, fmt.Errorf("config: dotenv %s: line %d: duplicate key %s", path, lineNo, key)
 		}
 
-		val, err := unquote(strings.TrimSpace(rawVal))
+		val, err := unquote(strings.TrimSpace(rawVal), path, lineNo)
 		if err != nil {
-			return nil, fmt.Errorf("config: dotenv %s: line %d: %w", path, lineNo, err)
+			return nil, err
 		}
 		vals[key] = val
 	}
@@ -95,15 +94,22 @@ func Dotenv(path string) (Source, error) {
 	}, nil
 }
 
-func unquote(s string) (string, error) {
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+func unquote(s string, path string, lineNo int) (string, error) {
+	// If value starts with a quote, it must end with the matching quote
+	if len(s) > 0 && s[0] == '"' {
+		if len(s) < 2 || s[len(s)-1] != '"' {
+			return "", fmt.Errorf("config: dotenv %s: line %d: unterminated double-quoted value", path, lineNo)
+		}
 		v, err := strconv.Unquote(s)
 		if err != nil {
-			return "", fmt.Errorf("malformed double-quoted value: %w", err)
+			return "", fmt.Errorf("config: dotenv %s: line %d: malformed double-quoted value: %w", path, lineNo, err)
 		}
 		return v, nil
 	}
-	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
+	if len(s) > 0 && s[0] == '\'' {
+		if len(s) < 2 || s[len(s)-1] != '\'' {
+			return "", fmt.Errorf("config: dotenv %s: line %d: unterminated single-quoted value", path, lineNo)
+		}
 		return s[1 : len(s)-1], nil
 	}
 	return s, nil

@@ -177,6 +177,74 @@ func TestDotenvHandlesInvalidDoubleQuoteEscape(t *testing.T) {
 	}
 }
 
+func TestDotenvRejectsUnterminatedDoubleQuote(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte(`KEY="unterminated`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := config.Dotenv(path)
+	if err == nil {
+		t.Fatal("Dotenv accepted unterminated double-quoted value")
+	}
+	if got := err.Error(); !strings.Contains(got, "unterminated") {
+		t.Errorf("error %q does not mention unterminated", got)
+	}
+}
+
+func TestDotenvRejectsUnterminatedSingleQuote(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte(`KEY='unterminated`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := config.Dotenv(path)
+	if err == nil {
+		t.Fatal("Dotenv accepted unterminated single-quoted value")
+	}
+	if got := err.Error(); !strings.Contains(got, "unterminated") {
+		t.Errorf("error %q does not mention unterminated", got)
+	}
+}
+
+func TestDotenvRejectsSingleCharacterDoubleQuote(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte(`KEY="`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := config.Dotenv(path)
+	if err == nil {
+		t.Fatal("Dotenv accepted single double-quote character")
+	}
+	if got := err.Error(); !strings.Contains(got, "unterminated") {
+		t.Errorf("error %q does not mention unterminated", got)
+	}
+}
+
+func TestDotenvRejectsSingleCharacterSingleQuote(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte(`KEY='`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := config.Dotenv(path)
+	if err == nil {
+		t.Fatal("Dotenv accepted single single-quote character")
+	}
+	if got := err.Error(); !strings.Contains(got, "unterminated") {
+		t.Errorf("error %q does not mention unterminated", got)
+	}
+}
+
 func TestDotenvDoubleQuoteExactlyTwoCharacters(t *testing.T) {
 	t.Parallel()
 
@@ -252,12 +320,12 @@ func TestDotenvSingleQuotePreservesEscapes(t *testing.T) {
 	}
 }
 
-func TestDotenvQuoteExactlyOneCharacter(t *testing.T) {
+func TestDotenvQuotesInMiddleOrEndAreRaw(t *testing.T) {
 	t.Parallel()
 
-	// Single quote or double quote alone are not treated as quoted
-	content := `KEY1="
-KEY2='
+	// Quotes not at the start are treated as raw unquoted values
+	content := `KEY1=a"b
+KEY2=a'b
 KEY3=a"
 KEY4=a'`
 
@@ -271,17 +339,17 @@ KEY4=a'`
 		t.Fatalf("Dotenv: %v", err)
 	}
 
-	// These are not quoted, so passed as-is
-	if v, ok := s("KEY1"); !ok || v != `"` {
-		t.Errorf("KEY1 = %q", v)
+	// These have quotes but not at start, so passed as-is (raw)
+	if v, ok := s("KEY1"); !ok || v != `a"b` {
+		t.Errorf("KEY1 = %q, want a\"b", v)
 	}
-	if v, ok := s("KEY2"); !ok || v != `'` {
-		t.Errorf("KEY2 = %q", v)
+	if v, ok := s("KEY2"); !ok || v != `a'b` {
+		t.Errorf("KEY2 = %q, want a'b", v)
 	}
 	if v, ok := s("KEY3"); !ok || v != `a"` {
-		t.Errorf("KEY3 = %q", v)
+		t.Errorf("KEY3 = %q, want a\"", v)
 	}
 	if v, ok := s("KEY4"); !ok || v != `a'` {
-		t.Errorf("KEY4 = %q", v)
+		t.Errorf("KEY4 = %q, want a'", v)
 	}
 }
