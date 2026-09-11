@@ -650,3 +650,26 @@ func BenchmarkWithExtractorAndWith(b *testing.B) {
 		_ = h.Handle(ctx, benchRecord())
 	}
 }
+
+// The benchmarks above report the cost; this asserts it, so a revert is
+// caught by `go test` rather than by someone remembering to read a
+// benchmark. It compares against plain slog rather than against a literal 0
+// because the race detector allocates on its own -- the claim is "svcrt costs
+// nothing extra", and that is what is measured.
+func TestNoExtractorWithAttrsCostsNothingExtraPerRecord(t *testing.T) {
+	ctx := context.Background()
+	measure := func(h slog.Handler) float64 {
+		return testing.AllocsPerRun(100, func() {
+			_ = h.Handle(ctx, slog.NewRecord(time.Now(), slog.LevelInfo, "hello", 0))
+		})
+	}
+
+	attrs := []slog.Attr{slog.String("service", "orders")}
+	plain := measure(slog.Handler(slog.NewJSONHandler(io.Discard, nil)).WithAttrs(attrs))
+	ours := measure(logging.NewHandler(slog.NewJSONHandler(io.Discard, nil)).WithAttrs(attrs))
+
+	if ours > plain {
+		t.Errorf("with no extractors, .With() then Handle allocates %.0f/op against plain slog's %.0f/op; "+
+			"WithAttrs is recording an op again instead of delegating", ours, plain)
+	}
+}

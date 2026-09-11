@@ -2,11 +2,30 @@
 
 This document records mutants that survive the mutation testing threshold for each module. Modules with perfect coverage (all mutants killed) have no entry.
 
+**Mutant ids and checksums drift.** go-mutesting numbers mutants per file in
+generation order, so editing a file renumbers every mutant after the edit
+point. The ids below were re-confirmed against live tool output at the R0
+fix wave; if they do not match what you see, re-derive them with
+`go-mutesting --no-exec --do-not-remove-tmp-folder ./...` and diff the saved
+mutant against its `.original`. Match entries by the **code they mutate**,
+which is quoted in every section, not by the id alone.
+
+`contract` and `examples/orders` both score 1.000 with no survivors, so
+neither has an entry.
+
 ## `config` Module
 
 **Mutation Score: above threshold, with 5 surviving mutants -- 4 verified
-equivalent and 1 a go-mutesting tooling artifact, both justified below.**
-Run `./scripts/mutation.sh config` for the current score and mutant total.
+equivalent and 1 a go-mutesting tooling artifact, all justified below.**
+As of the R0 fix wave those are `config.go.0`, `config.go.17`,
+`decode.go.25`, `decode.go.30` and `plan.go.26`. Run
+`./scripts/mutation.sh config` for the current score and mutant total.
+
+The cycle guard added to `plan.go` at the R0 fix wave produced one further
+survivor on its `continue` (mutated to `break`), and it was **not**
+equivalent: a `break` there drops every violation declared after the cyclic
+field, which contradicts the module's "every violation at once" contract.
+`TestBuildPlanKeepsWalkingAfterACycleViolation` kills it.
 
 Every non-equivalent mutant go-mutesting generates for this module is
 killed by the test suite. `decode.go`'s `decodeText` type-assertion guard
@@ -102,11 +121,16 @@ from any test.
 ### `config.go.0`: go-mutesting tooling artifact, not a real mutation
 
 go-mutesting reports one `config.go` mutant (index `0`, checksum
-`bb1b403603c5500d08629fdf27071865`) as a survivor on every run. Its
+`f6bce24131d5cc0e3b26176ae7fdda1d` at the R0 fix wave; the checksum tracks
+the file's content and changes whenever `config.go` does) as a survivor on
+every run. Its
 build failure is real (`undefined: Source`, `undefined: buildPlan`,
 `undefined: Error`, and similar, all citing line numbers in the real
 `config.go`), but the mutated source it saves to disk for inspection is
 byte-for-byte identical to the unmutated file:
+
+A transcript from the original investigation (the hashes move with the file;
+what matters is that all three are equal):
 
 ```
 $ md5 config.go go-mutesting-<run>/config.go.0 go-mutesting-<run>/config.go.original
@@ -127,24 +151,28 @@ first construct in the file). Not something a test can address.
 
 ## `logging` Module
 
-**Mutation Score: 0.837838 (31/37), below the project-wide 0.85 default --
-this module has its own 0.80 floor in `scripts/mutation.sh` (see the `case`
-statement there). The 6 surviving mutants, identified by the mutant id
-`go-mutesting` itself reports (confirmed with
+**Mutation Score: 0.860465 (37/43), below the project-wide 0.85 default --
+this module has its own 0.80 floor, recorded with its reason in the
+`MUTATION_FLOORS` table in `scripts/mutation.sh`. The 6 surviving mutants,
+identified by the mutant id `go-mutesting` itself reports (confirmed with
 `go-mutesting --do-not-remove-tmp-folder ./...`, deterministic across
-repeated runs), are `handler.go.4`, `handler.go.7`, `handler.go.14`,
-`handler.go.15`, `logging.go.0`, and `middleware.go.6` -- all verified
+repeated runs), are `handler.go.6`, `handler.go.9`, `handler.go.18`,
+`handler.go.19`, `logging.go.0`, and `middleware.go.6` -- all verified
 equivalent below.** Run `./scripts/mutation.sh logging` for the current
 score and mutant total.
 
-Task 11 added `middleware.go` (12 new mutants, one of them -- `.6` --
-equivalent, documented in its own section below); the other 5 survivors
-predate it and are unchanged. The total mutant count rose from 25 to 37 and
-the score rose from 0.80 to 0.837838, consistent with the fixed count of
-equivalents (now 6) being diluted across a larger total, not a regression.
+History of the count, which is the part worth auditing: Task 11 added
+`middleware.go` (12 new mutants, one of them -- `.6` -- equivalent). The R0
+fix wave added the no-extractor eager-delegation branches to `WithAttrs` and
+`WithGroup`, generating 6 more mutants, **all of which are killed** -- the
+total went 37 -> 43 and the kill count 31 -> 37, so the score rose from
+0.837838 to 0.860465 with the set of equivalents unchanged at 6. That edit
+also renumbered `handler.go`'s mutants: the four handler survivors below were
+`handler.go.4`, `.7`, `.14` and `.15` before it and are `.6`, `.9`, `.18` and
+`.19` after it. Same four guards, same four diffs, re-confirmed against live
+tool output.
 
-`logging` is a small module (37 total mutants as of Task 11's middleware,
-versus `config`'s 221), so a handful of equivalent mutants moves its score
+`logging` is a small module (43 total mutants, versus `config`'s 228), so a handful of equivalent mutants moves its score
 far more than the same count would move a larger module's. `config` reaches
 0.977 with 5 equivalents diluted across 221 mutants; the same *shape* of
 equivalents here, diluted across a much smaller total, caps the achievable
@@ -156,18 +184,18 @@ by its actual mutant id -- never "defensive programming," and never a
 guess at which mutant "should" survive. That rule is satisfied. The 0.80
 number is a tripwire recorded in the script, not evidence of a weaker test
 suite: every *other* mutant in this file -- including two that target the
-same two code regions as the survivors below (`handler.go.8` and
-`handler.go.16`, the slow-path counterpart of the fast-path guard
-documented below) -- is killed. See `handler_test.go`'s
+same two code regions as the survivors below (the slow-path counterparts
+of the fast-path guard documented below) -- is killed. See `handler_test.go`'s
 `TestWithGroupActuallyNestsSubsequentAttrs`,
 `TestFastPathAddsExtractorAttrsAfterRecordOwnAttrs`,
 `TestHandleClonesRecordBeforeMutatingIt`,
-`TestSlowPathSkipsWithAttrsWhenExtractorContributesNothing` (kills
-`handler.go.8`/`.16`), and `TestWithAttrsClipPreventsSiblingOpsCorruption`/
+`TestSlowPathSkipsWithAttrsWhenExtractorContributesNothing` (kills the
+slow-path pair), and `TestWithAttrsClipPreventsSiblingOpsCorruption`/
 `TestWithGroupClipPreventsSiblingOpsCorruption` (target a bug `go-mutesting`
 has no mutator for at all -- see the `slices.Clip` section below).
 
-Three deliberate guards produce these five surviving mutants: two mutants
+Three deliberate guards in `handler.go`/`logging.go` produce five of these
+surviving mutants (the sixth, `middleware.go.6`, has its own section): two mutants
 each target the same `len(h.ex) == 0` shortcut and the same fast-path
 `len(attrs) > 0` check (one mutating the condition, one the guarded
 statement, or the operator), and one targets `New`'s default-level
@@ -182,7 +210,7 @@ serve. **Do not delete these guards on the strength of this document's own
 equivalence proofs** -- the proofs establish that *behaviour* is
 unaffected, not that the guards are useless.
 
-### `handler.go.4` and `handler.go.14`: `Handle`'s fast-path `len(h.ex) == 0` shortcut
+### `handler.go.6` and `handler.go.18`: `Handle`'s fast-path `len(h.ex) == 0` shortcut
 
 ```go
 if len(h.ops) == 0 {
@@ -194,13 +222,13 @@ if len(h.ops) == 0 {
 ```
 
 Two distinct mutants survive on this one shortcut:
-- `handler.go.4` replaces the guarded statement with a no-op:
+- `handler.go.6` replaces the guarded statement with a no-op:
   `return h.next.Handle(ctx, r)` -> `_, _, _ = h.next.Handle, ctx, r`
   (so the `if` still fires when `h.ex` is empty, but no longer returns
   early -- falls through to `r.Clone()` and an empty range over `h.ex`).
-- `handler.go.14` replaces the condition with an always-false one:
+- `handler.go.18` replaces the condition with an always-false one:
   `len(h.ex) == 0` -> `len(h.ex) == -1` (so the shortcut never fires at
-  all, for the same net effect as `.4` when `h.ex` is in fact empty).
+  all, for the same net effect as `.6` when `h.ex` is in fact empty).
 
 **Why the guard exists:** `logging.NewHandler` can be constructed with zero
 extractors (a plain enrichment-free wrap), and this is the hot path for
@@ -224,7 +252,7 @@ built specifically to detect a missing/extra clone via
 `slog.Record.AddAttrs`'s own corruption self-check -- see below) leaves
 every test green either way.
 
-### `handler.go.7` and `handler.go.15`: fast-path extractor-attrs guard
+### `handler.go.9` and `handler.go.19`: fast-path extractor-attrs guard
 
 ```go
 r = r.Clone() // required: a handler must not mutate a record it did not create
@@ -235,7 +263,7 @@ for _, e := range h.ex {
 }
 ```
 
-`handler.go.7` loosens `> 0` to `>= 0`; `handler.go.15` loosens it to
+`handler.go.9` loosens `> 0` to `>= 0`; `handler.go.19` loosens it to
 `> -1`. Both make the guard always true, so `r.AddAttrs(attrs...)` runs
 even when an extractor contributes nothing (`attrs` nil or empty -- the
 documented, expected case for a context with no correlation data,
@@ -272,7 +300,7 @@ for _, e := range h.ex {
 }
 ```
 
--- produces `handler.go.8` (`>= 0`) and `handler.go.16` (`> -1`), and
+-- produces the corresponding slow-path mutants (`>= 0` and `> -1`), and
 **both are killed**, not equivalent: `log/slog`'s own
 `commonHandler.withAttrs` treats a zero-length call as a no-op for the
 *standard* handler, but `TestSlowPathSkipsWithAttrsWhenExtractorContributesNothing`
@@ -410,6 +438,14 @@ reads and applies the *second* branch's op instead of its own.
 grow a chain of 18 `WithAttrs`/`WithGroup` calls, branch two children with
 different attrs/group names off that same parent, and check each renders
 its own value.
+
+**Both tests must register an extractor.** Since the R0 fix wave,
+`WithAttrs`/`WithGroup` delegate eagerly to `h.next` when no extractor is
+present, so a no-extractor handler builds no `ops` slice at all -- there is
+nothing to share and nothing to corrupt, and the test would pass while
+testing plain `slog`. `traceExtractor()` contributes nothing to a bare
+context, so it keeps the ops path live without changing the expected
+output.
 
 One non-obvious wrinkle when testing `WithGroup` specifically: don't chain
 a further `WithAttrs`/`WithGroup` call onto each branch to give it

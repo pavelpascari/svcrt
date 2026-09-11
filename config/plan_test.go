@@ -486,3 +486,27 @@ func TestBuildPlanAllowsTheSameStructTypeAtTwoPlaces(t *testing.T) {
 		t.Errorf("env names = %v, want %v", got, want)
 	}
 }
+
+// A cycle violation must not stop the walk. "Every violation reported at
+// once" is the module's whole contract, and a `break` here instead of a
+// `continue` would silently drop every problem declared after the cyclic
+// field -- costing the operator a second restart to discover it.
+type cycleThenUntagged struct {
+	Next     *cycleThenUntagged `envPrefix:"NEXT_"`
+	Untagged string
+}
+
+func TestBuildPlanKeepsWalkingAfterACycleViolation(t *testing.T) {
+	t.Parallel()
+
+	_, vs := planFor[cycleThenUntagged](t, "")
+	if len(vs) != 2 {
+		t.Fatalf("violations = %v, want 2 (the cycle and the untagged field)", vs)
+	}
+	if vs[0].Field != "cycleThenUntagged.Next" {
+		t.Errorf("violations[0].Field = %q, want the cyclic field", vs[0].Field)
+	}
+	if vs[1].Field != "cycleThenUntagged.Untagged" {
+		t.Errorf("violations[1].Field = %q, want the untagged field declared after it", vs[1].Field)
+	}
+}
