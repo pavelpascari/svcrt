@@ -151,13 +151,13 @@ first construct in the file). Not something a test can address.
 
 ## `logging` Module
 
-**Mutation Score: 0.860465 (37/43), below the project-wide 0.85 default --
+**Mutation Score: 0.863636 (38/44), below the project-wide 0.85 default --
 this module has its own 0.80 floor, recorded with its reason in the
 `MUTATION_FLOORS` table in `scripts/mutation.sh`. The 6 surviving mutants,
 identified by the mutant id `go-mutesting` itself reports (confirmed with
 `go-mutesting --do-not-remove-tmp-folder ./...`, deterministic across
 repeated runs), are `handler.go.6`, `handler.go.9`, `handler.go.18`,
-`handler.go.19`, `logging.go.0`, and `middleware.go.6` -- all verified
+`handler.go.19`, `logging.go.0`, and `middleware.go.7` -- all verified
 equivalent below.** Run `./scripts/mutation.sh logging` for the current
 score and mutant total.
 
@@ -166,13 +166,21 @@ History of the count, which is the part worth auditing: Task 11 added
 fix wave added the no-extractor eager-delegation branches to `WithAttrs` and
 `WithGroup`, generating 6 more mutants, **all of which are killed** -- the
 total went 37 -> 43 and the kill count 31 -> 37, so the score rose from
-0.837838 to 0.860465 with the set of equivalents unchanged at 6. That edit
-also renumbered `handler.go`'s mutants: the four handler survivors below were
-`handler.go.4`, `.7`, `.14` and `.15` before it and are `.6`, `.9`, `.18` and
-`.19` after it. Same four guards, same four diffs, re-confirmed against live
-tool output.
+0.837838 to 0.860465 with the set of equivalents unchanged at 6. The final
+touch-up wave added the `if sw.written` guard around the status attribute in
+`Middleware` (see `middleware.go.7` below), generating one further mutant,
+**killed** -- the total went 43 -> 44 and the kill count 37 -> 38, so the
+score rose again to 0.863636 with the set of equivalents still unchanged at
+6. That edit renumbered the one surviving `middleware.go` mutant from `.6` to
+`.7`; it is the same diff (`w.status = http.StatusOK` ->
+`_, _ = w.status, http.StatusOK`), re-confirmed against live tool output
+(checksum `b7eb5f75e3cca84c9534ed2b4ebdad03`, unchanged). Before the Task 11
+edit, `handler.go`'s mutants were also renumbered: the four handler survivors
+below were `handler.go.4`, `.7`, `.14` and `.15` before it and are `.6`,
+`.9`, `.18` and `.19` after it. Same four guards, same four diffs,
+re-confirmed against live tool output.
 
-`logging` is a small module (43 total mutants, versus `config`'s 228), so a handful of equivalent mutants moves its score
+`logging` is a small module (44 total mutants, versus `config`'s 228), so a handful of equivalent mutants moves its score
 far more than the same count would move a larger module's. `config` reaches
 0.977 with 5 equivalents diluted across 221 mutants; the same *shape* of
 equivalents here, diluted across a much smaller total, caps the achievable
@@ -195,7 +203,7 @@ slow-path pair), and `TestWithAttrsClipPreventsSiblingOpsCorruption`/
 has no mutator for at all -- see the `slices.Clip` section below).
 
 Three deliberate guards in `handler.go`/`logging.go` produce five of these
-surviving mutants (the sixth, `middleware.go.6`, has its own section): two mutants
+surviving mutants (the sixth, `middleware.go.7`, has its own section): two mutants
 each target the same `len(h.ex) == 0` shortcut and the same fast-path
 `len(attrs) > 0` check (one mutating the condition, one the guarded
 statement, or the operator), and one targets `New`'s default-level
@@ -348,7 +356,7 @@ current documented behaviour, not a property of this package's own logic
 would stop being equivalent. The line stays for that reason as much as for
 the doc-comment one.
 
-### `middleware.go.6`: `statusWriter.Write`'s redundant `w.status = http.StatusOK`
+### `middleware.go.7`: `statusWriter.Write`'s redundant `w.status = http.StatusOK`
 
 ```go
 func (w *statusWriter) Write(b []byte) (int, error) {
@@ -389,7 +397,8 @@ Tried the direct route: reproduced the mutant by hand (see below) and ran
 the full suite, including `TestMiddlewareIgnoresWriteHeaderAfterImplicitWrite`
 (added specifically to probe this exact guard's `w.written = true`
 companion assignment, which is a *real*, non-equivalent mutant --
-`middleware.go.1` and `middleware.go.7` in the same `go-mutesting` run,
+`middleware.go.6` (`WriteHeader`) and `middleware.go.8` (`Write`) as of the
+final touch-up wave's renumbering, re-confirmed against live tool output;
 both killed by that test). With only the `w.status = http.StatusOK`
 assignment removed, every test still passes:
 
