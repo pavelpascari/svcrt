@@ -207,9 +207,11 @@ func TestMiddlewareLogsWhenTheHandlerPanics(t *testing.T) {
 	if line[logging.KeyMethod] != "GET" {
 		t.Errorf("%s = %v, want GET", logging.KeyMethod, line[logging.KeyMethod])
 	}
-	// Nothing wrote a header, so the status stays at the constructor's
-	// optimistic default. The line's value is that it exists at all.
-	if line[logging.KeyStatus] != float64(http.StatusOK) {
-		t.Errorf("%s = %v, want 200", logging.KeyStatus, line[logging.KeyStatus])
+	// Nothing wrote a header, and net/http sends no response at all on a
+	// panic, so the constructor's optimistic 200 default never happened.
+	// Reporting it -- or inventing a 500 -- would send an on-call engineer
+	// chasing the wrong thing. The status attribute must be absent.
+	if _, ok := line[logging.KeyStatus]; ok {
+		t.Errorf("%s = %v, want absent (nothing was written)", logging.KeyStatus, line[logging.KeyStatus])
 	}
 }

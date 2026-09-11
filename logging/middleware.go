@@ -65,10 +65,16 @@ func Middleware(l *slog.Logger) func(http.Handler) http.Handler {
 				if r.Pattern != "" {
 					attrs = append(attrs, slog.String(KeyRoute, r.Pattern))
 				}
-				attrs = append(attrs,
-					slog.Int(KeyStatus, sw.status),
-					slog.Int64(KeyDurMS, time.Since(start).Milliseconds()),
-				)
+				// sw.written is false when the handler panicked before writing
+				// anything: net/http sends no response at all in that case, so
+				// sw.status's optimistic 200 default is not what happened. Omit
+				// the attribute rather than claim a status nobody received -- a
+				// 500 would be just as invented, since the client saw a dropped
+				// connection, not a server error response.
+				if sw.written {
+					attrs = append(attrs, slog.Int(KeyStatus, sw.status))
+				}
+				attrs = append(attrs, slog.Int64(KeyDurMS, time.Since(start).Milliseconds()))
 
 				l.LogAttrs(r.Context(), slog.LevelInfo, "http request", attrs...)
 			}()
