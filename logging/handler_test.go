@@ -155,7 +155,9 @@ func TestLevelVarAllowsRuntimeFlipping(t *testing.T) {
 func TestWithAttrsDoesNotMutateReceiver(t *testing.T) {
 	t.Parallel()
 
-	log, lines := capture(t)
+	// With an extractor, so this exercises the recorded-ops path rather than
+	// slog's own WithAttrs.
+	log, lines := capture(t, traceExtractor())
 	base := log.With("a", 1)
 	_ = base.With("b", 2)
 
@@ -368,7 +370,11 @@ func TestWithAttrsClipPreventsSiblingOpsCorruption(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	mid := logging.NewHandler(slog.NewJSONHandler(&buf, nil))
+	// An extractor is required for this test to mean anything: with none
+	// registered, WithAttrs delegates eagerly and no ops slice is built, so
+	// there is no shared backing array to corrupt. traceExtractor contributes
+	// nothing to a bare context, so the expected output is unchanged.
+	mid := logging.NewHandler(slog.NewJSONHandler(&buf, nil), traceExtractor())
 	for i := 0; i < 18; i++ {
 		mid = mid.WithAttrs([]slog.Attr{slog.Int(fmt.Sprintf("p%d", i), i)})
 	}
@@ -411,7 +417,9 @@ func TestWithGroupClipPreventsSiblingOpsCorruption(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	mid := logging.NewHandler(slog.NewJSONHandler(&buf, nil))
+	// See the WithAttrs counterpart: without an extractor there is no ops
+	// slice to share, so the extractor is what keeps this test load-bearing.
+	mid := logging.NewHandler(slog.NewJSONHandler(&buf, nil), traceExtractor())
 	for i := 0; i < 18; i++ {
 		mid = mid.WithGroup(fmt.Sprintf("g%d", i))
 	}
@@ -587,5 +595,58 @@ func TestHandlerWithExtractorsSatisfiesSlogtest(t *testing.T) {
 
 	if err := slogtest.TestHandler(h, results); err != nil {
 		t.Errorf("slogtest.TestHandler with extractors: %v", err)
+	}
+}
+
+// --- allocation behaviour ---
+//
+// `log := base.With("service", "orders")` is the first thing most services do,
+// and it used to move every subsequent record onto the ops-replay slow path
+// permanently -- paying a WithAttrs clone per record to solve an
+// extractor-placement problem in a logger that has no extractors. These
+// benchmarks pin the fix: with no extractors registered, svcrt must cost
+// exactly what plain slog costs, whether or not .With() was called.
+
+func benchRecord() slog.Record {
+	return slog.NewRecord(time.Now(), slog.LevelInfo, "hello", 0)
+}
+
+func BenchmarkPlainSlogWithAttrs(b *testing.B) {
+	h := slog.Handler(slog.NewJSONHandler(io.Discard, nil)).
+		WithAttrs([]slog.Attr{slog.String("service", "orders")})
+	ctx := context.Background()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = h.Handle(ctx, benchRecord())
+	}
+}
+
+func BenchmarkNoExtractorsWithoutWith(b *testing.B) {
+	h := logging.NewHandler(slog.NewJSONHandler(io.Discard, nil))
+	ctx := context.Background()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = h.Handle(ctx, benchRecord())
+	}
+}
+
+// The regression guard. This must report 0 allocs/op.
+func BenchmarkNoExtractorsWithWith(b *testing.B) {
+	h := logging.NewHandler(slog.NewJSONHandler(io.Discard, nil)).
+		WithAttrs([]slog.Attr{slog.String("service", "orders")})
+	ctx := context.Background()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = h.Handle(ctx, benchRecord())
+	}
+}
+
+func BenchmarkWithExtractorAndWith(b *testing.B) {
+	h := logging.NewHandler(slog.NewJSONHandler(io.Discard, nil), traceExtractor()).
+		WithAttrs([]slog.Attr{slog.String("service", "orders")})
+	ctx := context.Background()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = h.Handle(ctx, benchRecord())
 	}
 }

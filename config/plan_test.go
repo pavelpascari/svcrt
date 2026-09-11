@@ -412,3 +412,77 @@ func TestBuildPlanContinuesPastEverySkipAndViolation(t *testing.T) {
 		t.Error("Final field not reached; loop may have stopped early (continue vs break)")
 	}
 }
+
+// --- cycle detection ---
+//
+// A self-referential config type used to make walk recurse forever. It never
+// panicked -- each level appends to a slice rather than growing the stack --
+// so the symptom was a process that simply never booted, which contradicts
+// the module's "fails fast with every violation reported at once" contract.
+
+type selfRef struct {
+	Name string   `env:"NAME" default:"x"`
+	Next *selfRef `envPrefix:"NEXT_"`
+}
+
+type mutualA struct {
+	Name string   `env:"NAME" default:"x"`
+	B    *mutualB `envPrefix:"B_"`
+}
+
+type mutualB struct {
+	Name string   `env:"NAME" default:"x"`
+	A    *mutualA `envPrefix:"A_"`
+}
+
+func TestBuildPlanRejectsDirectlySelfReferentialStruct(t *testing.T) {
+	t.Parallel()
+
+	_, vs := planFor[selfRef](t, "")
+	if len(vs) != 1 {
+		t.Fatalf("violations = %v, want exactly 1", vs)
+	}
+	if vs[0].Kind != KindSchema {
+		t.Errorf("kind = %v, want %v", vs[0].Kind, KindSchema)
+	}
+	if vs[0].Field != "selfRef.Next" {
+		t.Errorf("field = %q, want %q", vs[0].Field, "selfRef.Next")
+	}
+}
+
+func TestBuildPlanRejectsMutuallyRecursiveStructs(t *testing.T) {
+	t.Parallel()
+
+	_, vs := planFor[mutualA](t, "")
+	if len(vs) != 1 {
+		t.Fatalf("violations = %v, want exactly 1", vs)
+	}
+	if vs[0].Kind != KindSchema {
+		t.Errorf("kind = %v, want %v", vs[0].Kind, KindSchema)
+	}
+	// A -> B is fine; B -> A closes the loop and is where it is reported.
+	if vs[0].Field != "mutualA.B.A" {
+		t.Errorf("field = %q, want %q", vs[0].Field, "mutualA.B.A")
+	}
+}
+
+// The guard must track the ACTIVE walk path, not every type ever seen:
+// reusing one config fragment at two different prefixes is the documented way
+// to share a fragment (§5.4) and must keep working.
+func TestBuildPlanAllowsTheSameStructTypeAtTwoPlaces(t *testing.T) {
+	t.Parallel()
+
+	type twice struct {
+		Left  nested `envPrefix:"LEFT_"`
+		Right nested `envPrefix:"RIGHT_"`
+	}
+
+	p, vs := planFor[twice](t, "")
+	if len(vs) != 0 {
+		t.Fatalf("unexpected violations: %v", vs)
+	}
+	want := []string{"LEFT_ENDPOINT", "LEFT_TIMEOUT", "RIGHT_ENDPOINT", "RIGHT_TIMEOUT"}
+	if got := envNames(p); !reflect.DeepEqual(got, want) {
+		t.Errorf("env names = %v, want %v", got, want)
+	}
+}

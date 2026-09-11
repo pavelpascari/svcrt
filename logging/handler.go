@@ -52,9 +52,20 @@ func (h *handler) Enabled(ctx context.Context, l slog.Level) bool {
 // WithAttrs records the call instead of applying it, so Handle can place
 // extractor attributes beneath it. slices.Clip prevents a shared backing array
 // from letting one derived handler overwrite another's ops.
+//
+// With no extractors registered there is nothing to place, so the call is
+// delegated eagerly instead. That matters: recording an op moves every later
+// record onto Handle's ops-replay slow path permanently, which costs a
+// WithAttrs clone per record. `log := base.With("service", "orders")` is the
+// first thing most services do, and it should not buy an ongoing cost to
+// solve a problem the service does not have. Delegating keeps the
+// no-extractor logger at plain-slog cost -- zero allocations per record.
 func (h *handler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	if len(attrs) == 0 {
 		return h
+	}
+	if len(h.ex) == 0 {
+		return &handler{next: h.next.WithAttrs(attrs)}
 	}
 	return &handler{
 		next: h.next,
@@ -63,9 +74,14 @@ func (h *handler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	}
 }
 
+// WithGroup defers for the same reason WithAttrs does, and delegates eagerly
+// under the same condition. See WithAttrs.
 func (h *handler) WithGroup(name string) slog.Handler {
 	if name == "" {
 		return h
+	}
+	if len(h.ex) == 0 {
+		return &handler{next: h.next.WithGroup(name)}
 	}
 	return &handler{
 		next: h.next,

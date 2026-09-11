@@ -144,3 +144,28 @@ func TestIDTooLongErrorMessagePreservesArgumentOrder(t *testing.T) {
 		t.Errorf("Error() = %q, want %q", got, want)
 	}
 }
+
+// NewService(nil) must substitute an empty map, not keep the nil. Reads from
+// a nil map are harmless, so this is invisible through GetOrder -- but a
+// write panics, and the guard exists for the moment this service grows one.
+// Per this project's dead-code precedent: a clause whose difference some
+// caller can observe is kept and tested, not deleted.
+func TestNewServiceReplacesANilMap(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(nil)
+
+	if svc.orders == nil {
+		t.Fatal("NewService(nil) left the map nil")
+	}
+	// The observable consequence: this line panics on a nil map.
+	svc.orders["1"] = &Order{ID: "1", Qty: 1}
+
+	got, err := svc.GetOrder(context.Background(), GetOrderRequest{ID: "1"})
+	if err != nil {
+		t.Fatalf("GetOrder after a write: %v", err)
+	}
+	if got.Qty != 1 {
+		t.Errorf("Qty = %d, want 1", got.Qty)
+	}
+}

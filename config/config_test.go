@@ -414,3 +414,30 @@ func TestSecretDecodesFromConfig(t *testing.T) {
 		t.Errorf("Pass = %q, want %q", string(got.Pass), "hunter2")
 	}
 }
+
+// node is declared at package scope because a locally-declared type cannot
+// refer to itself.
+type node struct {
+	Name string `env:"NAME" default:"x"`
+	Next *node  `envPrefix:"NEXT_"`
+}
+
+// A cyclic config type must fail the load, not hang it. Before the cycle
+// guard this call never returned: walk recursed forever, allocating a binding
+// per level rather than overflowing the stack, so the symptom was a service
+// that silently never finished booting.
+func TestLoadRejectsCyclicConfigTypeInsteadOfHanging(t *testing.T) {
+	t.Parallel()
+
+	_, err := config.Load[node](config.WithSource(mapSource(nil)))
+	var cerr *config.Error
+	if !errors.As(err, &cerr) {
+		t.Fatalf("err is %T, want *config.Error", err)
+	}
+	if len(cerr.Violations) != 1 || cerr.Violations[0].Kind != config.KindSchema {
+		t.Fatalf("violations = %v, want one KindSchema", cerr.Violations)
+	}
+	if cerr.Violations[0].Field != "node.Next" {
+		t.Errorf("field = %q, want %q", cerr.Violations[0].Field, "node.Next")
+	}
+}

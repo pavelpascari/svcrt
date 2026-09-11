@@ -52,8 +52,9 @@ func buildPlan(t reflect.Type, prefix string) (*plan, []Violation) {
 	}
 
 	w := &walker{
-		p:    &plan{},
-		seen: map[string]string{},
+		p:      &plan{},
+		seen:   map[string]string{},
+		active: []reflect.Type{t},
 	}
 	w.walk(t, t.Name(), prefix, nil)
 	return w.p, w.violations
@@ -63,6 +64,17 @@ type walker struct {
 	p          *plan
 	violations []Violation
 	seen       map[string]string // env key -> field path that claimed it
+
+	// active is the stack of struct types on the current walk path, used to
+	// refuse a cyclic config type. Without it `type Node struct { Next *Node
+	// \`envPrefix:"N_"\` }` recurses forever: each level appends a binding
+	// rather than growing the stack, so there is no panic -- just a process
+	// that never boots, which is the opposite of this module's contract.
+	//
+	// It is a path stack rather than a set of every type ever seen, because
+	// reusing one config fragment at two different prefixes is the documented
+	// way to share a fragment (§5.4) and must keep working.
+	active []reflect.Type
 }
 
 func (w *walker) add(v Violation) { w.violations = append(w.violations, v) }
@@ -99,9 +111,18 @@ func (w *walker) walk(t reflect.Type, path, prefix string, index []int) {
 			inner := f.Type
 			if inner.Kind() == reflect.Pointer {
 				inner = inner.Elem()
+			}
+			if slices.Contains(w.active, inner) {
+				w.add(Violation{Field: fieldPath, Kind: KindSchema,
+					Err: fmt.Errorf("cyclic config type: %s contains itself", inner)})
+				continue
+			}
+			if f.Type.Kind() == reflect.Pointer {
 				w.p.blocks = append(w.p.blocks, block{index: fieldIndex, field: fieldPath})
 			}
+			w.active = append(w.active, inner)
 			w.walk(inner, fieldPath, prefix+prefixTag, fieldIndex)
+			w.active = w.active[:len(w.active)-1]
 			continue
 		}
 

@@ -166,3 +166,50 @@ func TestMiddlewarePassesRequestThrough(t *testing.T) {
 		t.Errorf("body = %q, want %q", got, "hello body")
 	}
 }
+
+// The request you most want in the access log is the one that blew up.
+// LogAttrs used not to be deferred, so a panicking handler skipped it
+// entirely and the crash left no line at all.
+func TestMiddlewareLogsWhenTheHandlerPanics(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	log := logging.New(&buf, logging.Options{Level: slog.LevelDebug})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /boom", func(w http.ResponseWriter, r *http.Request) {
+		panic("kaboom")
+	})
+	h := logging.Middleware(log)(mux)
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/boom", nil))
+	}()
+
+	// The middleware must observe the panic, not swallow it: recovery is the
+	// service author's decision, made in their own middleware.
+	if recovered != "kaboom" {
+		t.Fatalf("recovered = %v, want the panic to propagate", recovered)
+	}
+
+	if buf.Len() == 0 {
+		t.Fatal("no log line emitted for a panicking handler")
+	}
+	line := map[string]any{}
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &line); err != nil {
+		t.Fatalf("decode log line %q: %v", buf.String(), err)
+	}
+	if line[logging.KeyRoute] != "GET /boom" {
+		t.Errorf("%s = %v, want %q", logging.KeyRoute, line[logging.KeyRoute], "GET /boom")
+	}
+	if line[logging.KeyMethod] != "GET" {
+		t.Errorf("%s = %v, want GET", logging.KeyMethod, line[logging.KeyMethod])
+	}
+	// Nothing wrote a header, so the status stays at the constructor's
+	// optimistic default. The line's value is that it exists at all.
+	if line[logging.KeyStatus] != float64(http.StatusOK) {
+		t.Errorf("%s = %v, want 200", logging.KeyStatus, line[logging.KeyStatus])
+	}
+}
