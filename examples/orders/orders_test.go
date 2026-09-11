@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,5 +115,32 @@ func TestIDTooLongErrorCarriesScalarParams(t *testing.T) {
 		default:
 			t.Errorf("param %q is %T; params must be scalars", k, v)
 		}
+	}
+}
+
+func TestNotFoundErrorMessageNamesTheID(t *testing.T) {
+	t.Parallel()
+
+	err := notFoundError{id: "abc123"}
+
+	// The message must name which order was missing -- this string lands in
+	// server-side logs, and "not found" with no ID is useless to an on-call
+	// engineer.
+	if !strings.Contains(err.Error(), "abc123") {
+		t.Errorf("Error() = %q, want it to contain the order id %q", err.Error(), "abc123")
+	}
+}
+
+func TestIDTooLongErrorMessagePreservesArgumentOrder(t *testing.T) {
+	t.Parallel()
+
+	err := idTooLongError{Max: 8, Got: 40}
+
+	// Pin the exact string, not just presence of the digits: "40" and "8"
+	// both appear whichever way Got/Max are swapped in the Sprintf call, so
+	// only whole-string equality catches a future argument-order regression.
+	const want = "id length 40 exceeds max 8"
+	if got := err.Error(); got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
 	}
 }
