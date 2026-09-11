@@ -1,0 +1,168 @@
+package logging_test
+
+import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/pavelpascari/svcrt/logging"
+)
+
+func captureServe(t *testing.T, mux http.Handler, req *http.Request) (*httptest.ResponseRecorder, map[string]any) {
+	t.Helper()
+
+	var buf bytes.Buffer
+	log := logging.New(&buf, logging.Options{Level: slog.LevelDebug})
+	h := logging.Middleware(log)(mux)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	line := map[string]any{}
+	if buf.Len() == 0 {
+		t.Fatal("middleware emitted no log line")
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &line); err != nil {
+		t.Fatalf("decode log line %q: %v", buf.String(), err)
+	}
+	return rec, line
+}
+
+func TestMiddlewareLogsRoutePatternNotPath(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /orders/{id}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	_, line := captureServe(t, mux, httptest.NewRequest("GET", "/orders/8a3f-not-a-route", nil))
+
+	if line[logging.KeyRoute] != "GET /orders/{id}" {
+		t.Errorf("%s = %v, want the pattern", logging.KeyRoute, line[logging.KeyRoute])
+	}
+	if line[logging.KeyMethod] != "GET" {
+		t.Errorf("%s = %v, want GET", logging.KeyMethod, line[logging.KeyMethod])
+	}
+	if line[logging.KeyStatus] != float64(200) {
+		t.Errorf("%s = %v, want 200", logging.KeyStatus, line[logging.KeyStatus])
+	}
+	if _, ok := line[logging.KeyDurMS]; !ok {
+		t.Errorf("%s missing from %v", logging.KeyDurMS, line)
+	}
+}
+
+// A high-cardinality path must never reach the log line, even on a 404, or a
+// scanner can inflate log volume at will.
+func TestMiddlewareOmitsRouteWhenNoPatternMatched(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /orders/{id}", func(w http.ResponseWriter, r *http.Request) {})
+
+	_, line := captureServe(t, mux, httptest.NewRequest("GET", "/no-such-route-8a3f", nil))
+
+	if v, ok := line[logging.KeyRoute]; ok {
+		t.Errorf("%s = %v, want it omitted on an unmatched request", logging.KeyRoute, v)
+	}
+	for k, v := range line {
+		if s, isStr := v.(string); isStr && s == "/no-such-route-8a3f" {
+			t.Errorf("raw path leaked into key %q", k)
+		}
+	}
+	if line[logging.KeyStatus] != float64(404) {
+		t.Errorf("%s = %v, want 404", logging.KeyStatus, line[logging.KeyStatus])
+	}
+}
+
+func TestMiddlewareRecordsExplicitStatus(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /x", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	})
+
+	rec, line := captureServe(t, mux, httptest.NewRequest("GET", "/x", nil))
+
+	if rec.Code != http.StatusTeapot {
+		t.Errorf("recorder code = %d, want 418", rec.Code)
+	}
+	if line[logging.KeyStatus] != float64(418) {
+		t.Errorf("%s = %v, want 418", logging.KeyStatus, line[logging.KeyStatus])
+	}
+}
+
+func TestMiddlewareDefaultsToStatus200OnImplicitWrite(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /x", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("body")) // no WriteHeader call
+	})
+
+	_, line := captureServe(t, mux, httptest.NewRequest("GET", "/x", nil))
+
+	if line[logging.KeyStatus] != float64(200) {
+		t.Errorf("%s = %v, want 200", logging.KeyStatus, line[logging.KeyStatus])
+	}
+}
+
+// A WriteHeader call after an implicit write (the body already went out
+// under the implicit 200) is superfluous -- the real header was already
+// sent. The wrapper must keep recording the first, implicit status rather
+// than letting a later WriteHeader call overwrite it, which requires an
+// implicit Write to mark the writer as written just as an explicit
+// WriteHeader does.
+func TestMiddlewareIgnoresWriteHeaderAfterImplicitWrite(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /x", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("body")) // implicit 200, marks the writer written
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	_, line := captureServe(t, mux, httptest.NewRequest("GET", "/x", nil))
+
+	if line[logging.KeyStatus] != float64(200) {
+		t.Errorf("%s = %v, want 200 (superfluous WriteHeader must not overwrite it)", logging.KeyStatus, line[logging.KeyStatus])
+	}
+}
+
+// A naive ResponseWriter wrapper silently breaks SSE and connection upgrades.
+// The wrapper must stay transparent to http.ResponseController.
+func TestMiddlewarePreservesFlusherThroughResponseController(t *testing.T) {
+	t.Parallel()
+
+	var flushErr error
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /stream", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("chunk"))
+		flushErr = http.NewResponseController(w).Flush()
+	})
+
+	captureServe(t, mux, httptest.NewRequest("GET", "/stream", nil))
+
+	if flushErr != nil {
+		t.Errorf("Flush through the wrapper failed: %v", flushErr)
+	}
+}
+
+func TestMiddlewarePassesRequestThrough(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /x", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("hello body"))
+	})
+
+	rec, _ := captureServe(t, mux, httptest.NewRequest("GET", "/x", nil))
+
+	if got := rec.Body.String(); got != "hello body" {
+		t.Errorf("body = %q, want %q", got, "hello body")
+	}
+}

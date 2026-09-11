@@ -124,3 +124,354 @@ distinguish -- this is not a claim about test coverage, equivalent or
 otherwise; it is a reporting anomaly in the tool itself (most likely a
 file-swap/restore ordering issue around whichever mutator targets the
 first construct in the file). Not something a test can address.
+
+## `logging` Module
+
+**Mutation Score: 0.837838 (31/37), below the project-wide 0.85 default --
+this module has its own 0.80 floor in `scripts/mutation.sh` (see the `case`
+statement there). The 6 surviving mutants, identified by the mutant id
+`go-mutesting` itself reports (confirmed with
+`go-mutesting --do-not-remove-tmp-folder ./...`, deterministic across
+repeated runs), are `handler.go.4`, `handler.go.7`, `handler.go.14`,
+`handler.go.15`, `logging.go.0`, and `middleware.go.6` -- all verified
+equivalent below.** Run `./scripts/mutation.sh logging` for the current
+score and mutant total.
+
+Task 11 added `middleware.go` (12 new mutants, one of them -- `.6` --
+equivalent, documented in its own section below); the other 5 survivors
+predate it and are unchanged. The total mutant count rose from 25 to 37 and
+the score rose from 0.80 to 0.837838, consistent with the fixed count of
+equivalents (now 6) being diluted across a larger total, not a regression.
+
+`logging` is a small module (37 total mutants as of Task 11's middleware,
+versus `config`'s 221), so a handful of equivalent mutants moves its score
+far more than the same count would move a larger module's. `config` reaches
+0.977 with 5 equivalents diluted across 221 mutants; the same *shape* of
+equivalents here, diluted across a much smaller total, caps the achievable
+score at 0.80 -- the floor recorded in `scripts/mutation.sh` is a tripwire
+set below the historical low, not a target. The binding rule is still
+the one `config` established: every surviving mutant is either killed by a
+new test or justified here with a specific, verified argument, identified
+by its actual mutant id -- never "defensive programming," and never a
+guess at which mutant "should" survive. That rule is satisfied. The 0.80
+number is a tripwire recorded in the script, not evidence of a weaker test
+suite: every *other* mutant in this file -- including two that target the
+same two code regions as the survivors below (`handler.go.8` and
+`handler.go.16`, the slow-path counterpart of the fast-path guard
+documented below) -- is killed. See `handler_test.go`'s
+`TestWithGroupActuallyNestsSubsequentAttrs`,
+`TestFastPathAddsExtractorAttrsAfterRecordOwnAttrs`,
+`TestHandleClonesRecordBeforeMutatingIt`,
+`TestSlowPathSkipsWithAttrsWhenExtractorContributesNothing` (kills
+`handler.go.8`/`.16`), and `TestWithAttrsClipPreventsSiblingOpsCorruption`/
+`TestWithGroupClipPreventsSiblingOpsCorruption` (target a bug `go-mutesting`
+has no mutator for at all -- see the `slices.Clip` section below).
+
+Three deliberate guards produce these five surviving mutants: two mutants
+each target the same `len(h.ex) == 0` shortcut and the same fast-path
+`len(attrs) > 0` check (one mutating the condition, one the guarded
+statement, or the operator), and one targets `New`'s default-level
+assignment. Two of the three guards are kept specifically because
+mutation testing cannot see the dimension they exist for: **mutation
+testing measures behaviour, not cost, and these guards exist purely to
+bound allocations on a per-request path** (`logging`'s handler runs on
+every HTTP request). Removing them would not fix a test gap -- it would
+delete real work the guards do, to satisfy a proxy metric, at the expense
+of the actual goal (bounded allocations) that metric is supposed to
+serve. **Do not delete these guards on the strength of this document's own
+equivalence proofs** -- the proofs establish that *behaviour* is
+unaffected, not that the guards are useless.
+
+### `handler.go.4` and `handler.go.14`: `Handle`'s fast-path `len(h.ex) == 0` shortcut
+
+```go
+if len(h.ops) == 0 {
+	if len(h.ex) == 0 {
+		return h.next.Handle(ctx, r)
+	}
+	r = r.Clone() // required: a handler must not mutate a record it did not create
+	...
+```
+
+Two distinct mutants survive on this one shortcut:
+- `handler.go.4` replaces the guarded statement with a no-op:
+  `return h.next.Handle(ctx, r)` -> `_, _, _ = h.next.Handle, ctx, r`
+  (so the `if` still fires when `h.ex` is empty, but no longer returns
+  early -- falls through to `r.Clone()` and an empty range over `h.ex`).
+- `handler.go.14` replaces the condition with an always-false one:
+  `len(h.ex) == 0` -> `len(h.ex) == -1` (so the shortcut never fires at
+  all, for the same net effect as `.4` when `h.ex` is in fact empty).
+
+**Why the guard exists:** `logging.NewHandler` can be constructed with zero
+extractors (a plain enrichment-free wrap), and this is the hot path for
+every request when that's the case. Without the guard, every single record
+pays for a `Record.Clone()` call it will never use, on every request.
+
+**Why both are equivalent in behaviour:** `r` is a value parameter local to
+`Handle`; nothing after the fast-path return ever uses it again once it's
+handed to `h.next.Handle(ctx, r)`. `Clone()`'s only effect is
+`r.back = slices.Clip(r.back)`, which rewrites the *local copy's* slice
+header (length/cap), not the underlying array, and not any other copy's
+header. Since `len(h.ex) == 0` means the subsequent `for _, e := range h.ex`
+loop never executes regardless of either mutation, no `AddAttrs` call ever
+follows the (skipped-or-not) `Clone()`. A slice-header rewrite with no
+following mutation and no further use of the value is unobservable through
+any output-based test, any JSON diff, or any spy on `next` (both branches
+call `next.Handle` exactly once, with content that is byte-identical).
+Verified directly for both mutants: reproducing each edit by hand and
+running the full suite (including `TestHandleClonesRecordBeforeMutatingIt`,
+built specifically to detect a missing/extra clone via
+`slog.Record.AddAttrs`'s own corruption self-check -- see below) leaves
+every test green either way.
+
+### `handler.go.7` and `handler.go.15`: fast-path extractor-attrs guard
+
+```go
+r = r.Clone() // required: a handler must not mutate a record it did not create
+for _, e := range h.ex {
+	if attrs := e(ctx); len(attrs) > 0 {
+		r.AddAttrs(attrs...)
+	}
+}
+```
+
+`handler.go.7` loosens `> 0` to `>= 0`; `handler.go.15` loosens it to
+`> -1`. Both make the guard always true, so `r.AddAttrs(attrs...)` runs
+even when an extractor contributes nothing (`attrs` nil or empty -- the
+documented, expected case for a context with no correlation data,
+exercised by `TestExtractorContributesNothingWhenContextIsBare`).
+
+**Why the guard exists:** an extractor runs on every record ("must be
+cheap"), and contributing nothing is the *common* case for background work
+with no request context. The guard skips a call into `Record.AddAttrs`
+that would otherwise run, unconditionally, on every enriched record.
+
+**Why both are equivalent in behaviour:** by this point `r` has already
+been cloned, so `r.back`'s capacity equals its length exactly
+(`slices.Clip`). Reading `log/slog`'s own `Record.AddAttrs` source
+confirms a zero-length call is a strict no-op regardless: its fill loop is
+bounded by `len(attrs)` (0 iterations), its "was this copy mutated
+elsewhere" self-check requires `cap(r.back) > len(r.back)` (false, just
+after `Clip`), and `slices.Grow(r.back, 0)` performs no allocation. There is
+no `attrs` value (nil or a genuine empty slice both have `len == 0`) for
+which calling `AddAttrs` differs observably from not calling it at all, on
+a freshly cloned record. Tried the direct route first: since `Record` is a
+value type with no interface to spy on the way `slog.Handler` has, the only
+way to distinguish "was AddAttrs called" from "was it skipped" is to
+observe `r`'s own state afterward, and that state is identical either way
+by construction of `AddAttrs` itself, not by coincidence.
+
+The slow-path counterpart of this same guard --
+
+```go
+n := h.next
+for _, e := range h.ex {
+	if attrs := e(ctx); len(attrs) > 0 {
+		n = n.WithAttrs(attrs)
+	}
+}
+```
+
+-- produces `handler.go.8` (`>= 0`) and `handler.go.16` (`> -1`), and
+**both are killed**, not equivalent: `log/slog`'s own
+`commonHandler.withAttrs` treats a zero-length call as a no-op for the
+*standard* handler, but `TestSlowPathSkipsWithAttrsWhenExtractorContributesNothing`
+wraps a custom spy `slog.Handler` that counts `WithAttrs` calls regardless
+of arguments, to check whether the *call itself* happens rather than
+whether the standard handler shrugs it off. That test fails the moment
+either guard is loosened (confirmed by reproducing each mutation by hand:
+`next.WithAttrs called 1 times for an extractor that contributed
+nothing`). This is the fast/slow-path asymmetry to watch for: the same
+guard shape is equivalent on one path and killed on the other, because
+`Record.AddAttrs` and `slog.Handler.WithAttrs` differ in whether a
+zero-length call is inert *in a way this package's own tests can observe*.
+
+### `logging.go.0`: `New`'s default-level assignment
+
+```go
+level := opts.Level
+if level == nil {
+	level = slog.LevelInfo
+}
+base := slog.NewJSONHandler(w, &slog.HandlerOptions{
+	Level: level,
+	...
+```
+
+Mutant: delete the assignment inside the `if`, so `level` stays `nil` and is
+passed to `slog.HandlerOptions.Level` as-is.
+
+**Why the line exists:** it exists to make `Options.Level`'s doc comment
+("Nil means slog.LevelInfo") true by *this package's own code*, not by an
+inherited default from a dependency. That is deliberate API-surface
+explicitness, independent of whether `slog` happens to default the same
+way today.
+
+**Why it's equivalent in behaviour today:** `slog.HandlerOptions.Level`'s
+own doc says "If Level is nil, the handler assumes LevelInfo" -- verified
+directly (not just by reading the doc) by constructing two
+`slog.NewJSONHandler`s, one with `Level: nil` and one with
+`Level: slog.LevelInfo`, and comparing `Enabled()` across Debug/Info/
+Warn/Error: identical for both. So today, `level == nil` reaching
+`slog.NewJSONHandler` unchanged behaves exactly like explicitly setting
+`slog.LevelInfo`. This is an equivalence borrowed from a dependency's
+current documented behaviour, not a property of this package's own logic
+-- if `log/slog` ever changed its own default, this "equivalent" mutant
+would stop being equivalent. The line stays for that reason as much as for
+the doc-comment one.
+
+### `middleware.go.6`: `statusWriter.Write`'s redundant `w.status = http.StatusOK`
+
+```go
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if !w.written {
+		w.status = http.StatusOK
+		w.written = true
+	}
+	return w.ResponseWriter.Write(b)
+}
+```
+
+Mutant: replace the assignment `w.status = http.StatusOK` with a no-op
+reference to both operands (`_, _ = w.status, http.StatusOK`), leaving
+`w.written = true` untouched.
+
+**Why the line exists:** it makes the "implicit write means 200" rule
+readable at its point of effect, rather than relying on a reader to trace
+back to `Middleware`'s construction of the writer to see where the default
+comes from.
+
+**Why it's equivalent in behaviour:** `statusWriter.status` is initialized
+to `http.StatusOK` in `Middleware` (`&statusWriter{ResponseWriter: w,
+status: http.StatusOK}`) and is mutated nowhere else in the type except
+this line and `WriteHeader`'s own `w.status = code`, both of which are
+guarded by the identical `if !w.written` condition and both of which set
+`w.written = true` in the same guarded block. So the two write sites to
+`status` are mutually exclusive with respect to which one can fire first,
+and whichever fires first is gated by `!w.written` being true, which is
+only possible while `status` still holds its initial value (nothing else
+can have changed it without also having flipped `written`). Concretely: the
+body of `Write`'s guard only executes when `w.written` is still `false`,
+and by the invariant above that means `w.status` has not been written by
+`WriteHeader` either, so it is still exactly `http.StatusOK` -- the value
+already sitting there since construction. Overwriting it with the same
+value it already holds is unobservable.
+
+Tried the direct route: reproduced the mutant by hand (see below) and ran
+the full suite, including `TestMiddlewareIgnoresWriteHeaderAfterImplicitWrite`
+(added specifically to probe this exact guard's `w.written = true`
+companion assignment, which is a *real*, non-equivalent mutant --
+`middleware.go.1` and `middleware.go.7` in the same `go-mutesting` run,
+both killed by that test). With only the `w.status = http.StatusOK`
+assignment removed, every test still passes:
+
+```
+$ go test -race ./...
+ok  	github.com/pavelpascari/svcrt/logging	1.5s
+```
+
+This is the same "constant reassignment of an already-correct value" shape
+as `logging.go.0` above, not a new failure mode: the guard's *real* job --
+recording that a write happened at all, via `w.written = true` -- is
+covered and enforced by `TestMiddlewareIgnoresWriteHeaderAfterImplicitWrite`;
+only the redundant re-statement of the already-current default is
+equivalent.
+
+### `slices.Clip` in `WithAttrs`/`WithGroup`: correct, but no mutator can see it
+
+Not a survivor -- `go-mutesting` has no mutator for "delete this stdlib
+call," so it never generates a mutant for `slices.Clip(h.ops)` at all. That
+means the gate is silent on this line by construction, not because it's
+safe to remove. Worth recording here so the next reader doesn't mistake
+"no mutant" for "no risk."
+
+```go
+ops: append(slices.Clip(h.ops), op{attrs: attrs}),   // WithAttrs
+ops: append(slices.Clip(h.ops), op{group: name}),    // WithGroup
+```
+
+Stripping `slices.Clip` from either call and running the full suite before
+adding new tests: **all tests still passed.** `TestWithAttrsDoesNotMutateReceiver`
+only chains one level deep and never branches two handlers off the same
+capacity-loaded parent, so it can't see the bug.
+
+The bug: chaining `WithAttrs`/`WithGroup` enough times (empirically, Go's
+own append growth leaves spare capacity well before 18 single-op appends --
+confirmed directly: a 3-element `[]op` already has `cap` 4) leaves a
+handler's `ops` slice with `cap > len`. Branching two handlers off that
+same parent with `append(h.ops, ...)` (no `Clip`) makes both appends target
+the *same* index in the shared backing array; whichever branch is
+constructed second silently overwrites the first branch's op in memory
+that the first branch's own (already-returned) `ops` slice still points
+into -- so when the first branch is finally used to `Handle` a record, it
+reads and applies the *second* branch's op instead of its own.
+`TestWithAttrsClipPreventsSiblingOpsCorruption` and
+`TestWithGroupClipPreventsSiblingOpsCorruption` reproduce exactly this:
+grow a chain of 18 `WithAttrs`/`WithGroup` calls, branch two children with
+different attrs/group names off that same parent, and check each renders
+its own value.
+
+One non-obvious wrinkle when testing `WithGroup` specifically: don't chain
+a further `WithAttrs`/`WithGroup` call onto each branch to give it
+something to render. That subsequent call's own (correctly clipped) append
+copies the vulnerable op out of the shared array before the sibling gets a
+chance to corrupt it, which silently masks the exact bug under test.
+Instead, give each branch's own `Record` an attr directly (`r.AddAttrs`) at
+`Handle` time -- a group nests a record's own attrs the same way it nests
+`WithAttrs`-attached ones, without needing another tracked `op`.
+
+Verified both directions for both methods, by manually removing
+`slices.Clip` from each call site in turn and reverting after:
+
+```
+$ go test -race -run TestWithAttrsClipPreventsSiblingOpsCorruption -v ./...   # Clip removed from WithAttrs
+    handler_test.go:398: left branch = right, want left (sibling ops slice was overwritten)
+--- FAIL: TestWithAttrsClipPreventsSiblingOpsCorruption (0.00s)
+
+$ go test -race -run TestWithAttrsClipPreventsSiblingOpsCorruption -v ./...   # Clip restored
+--- PASS: TestWithAttrsClipPreventsSiblingOpsCorruption (0.00s)
+
+$ go test -race -run TestWithGroupClipPreventsSiblingOpsCorruption -v ./...   # Clip removed from WithGroup
+    handler_test.go:451: left line missing its own "left" group or contains "right" (sibling ops slice was overwritten): {...,"g17":{"right":{"k":"v"}}}
+--- FAIL: TestWithGroupClipPreventsSiblingOpsCorruption (0.00s)
+
+$ go test -race -run TestWithGroupClipPreventsSiblingOpsCorruption -v ./...   # Clip restored
+--- PASS: TestWithGroupClipPreventsSiblingOpsCorruption (0.00s)
+```
+
+### The `r.Clone()` corruption-oracle technique (used to kill, not survive, a mutant)
+
+Worth recording here because it is non-obvious and the next person to touch
+`handler.go` will need the same trick: `TestHandleClonesRecordBeforeMutatingIt`
+proves the fast path's `r = r.Clone()` (in the branch with a non-empty
+`h.ex`) is load-bearing, without relying on a data race or on inspecting any
+unexported field. `slog.Record.AddAttrs` contains its own internal defense
+against exactly the bug this line prevents:
+
+```go
+// Check if a copy was modified by slicing past the end
+// and seeing if the Attr there is non-zero.
+if cap(r.back) > len(r.back) {
+	end := r.back[:len(r.back)+1][len(r.back)]
+	if !end.isEmpty() {
+		r.back = slices.Clip(r.back)
+		r.back = append(r.back, String("!BUG", "AddAttrs unsafely called on copy of Record made without using Record.Clone"))
+	}
+}
+```
+
+So: build a `Record` whose internal `back` overflow slice has spare
+capacity (empirically, fill the 5-slot front array, then add attrs one at a
+time -- by the third individual back-append the slice consistently has
+`cap > len`; bulk `AddAttrs(all-at-once)` does not reproduce this because
+`slices.Grow` sizes an all-at-once call exactly), take a `sibling := base`
+copy while that capacity is still shared, run `base` through the handler
+under test, then call `sibling.AddAttrs(...)` and dump it through a plain
+`slog.JSONHandler`. If the handler under test mutated `base`'s shared array
+without cloning, `sibling`'s own next `AddAttrs` call trips `log/slog`'s
+own guard and the dump contains `"!BUG":"AddAttrs unsafely called on copy
+of Record made without using Record.Clone"`. This is deterministic --
+no goroutines, no timing, no reliance on a specific Go slice-growth
+implementation detail beyond the one empirically pinned above -- and was
+confirmed both ways: it reproduces `!BUG` when `r.Clone()` is removed, and
+stays clean when it is present.
