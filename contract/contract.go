@@ -2,14 +2,26 @@
 // code depends on. It imports only "context" and never anything else, so a
 // generated service's non-stdlib dependency footprint is this package alone.
 //
-// The API surface is deliberately tiny and is frozen at v1. Every addition is
-// a design review.
+// The API surface is deliberately tiny, and the intent is to freeze it at
+// v1. That freeze has NOT been decided: the design spec leaves it open
+// (§10, D3), R0 ships contract unfrozen, and examples/orders' hand-written
+// middleware exists to generate the evidence the decision needs. Until it is
+// settled, treat every addition as a design review.
 package contract
 
-// APIV1 is a compile-time compatibility marker. Generated code references it.
-// A breaking change to this module removes it, so generated code that has
-// skewed from its generator fails at build time with a comprehensible error
-// rather than misbehaving at runtime.
+// APIV1 is a compile-time marker that generated code references.
+//
+// What it detects is narrower than it looks, and worth writing down before
+// the freeze makes it unremovable. It does NOT guard against a generated
+// service building against an incompatible contract module: Go's own rules
+// already prevent that, because a breaking change here becomes contract/v2
+// with a different import path, which no existing generated code can
+// accidentally resolve to. The marker earns its place on the other axis --
+// generator generations inside a permanently-v1 module. A later generator
+// whose emitted code needs something this one does not will reference an
+// APIV2 declared alongside this type, so code from the newer generator fails
+// against an older contract with "undefined: contract.APIV2" rather than
+// misbehaving at runtime.
 type APIV1 struct{}
 
 // Coded is implemented by errors whose code is part of the API surface.
@@ -28,6 +40,18 @@ type Coded interface {
 // Implementing it is optional; errors with nothing to substitute should
 // implement Coded alone. Values must be scalars — strings, numbers, or bools —
 // because a client substitutes them into a template it owns.
+//
+// That constraint is enforced at the serialization boundary and by review,
+// not by the compiler, and that is deliberate. Go cannot express a scalar
+// type-union as a map value type, so the honest options were map[string]any
+// or a hand-rolled Param wrapper type at every call site. The wrapper was
+// rejected because it does not catch the violation that actually happens:
+// the realistic mistake is not returning a struct, it is returning
+// {"reason": "quantity is too high"} — a perfectly scalar string that is
+// also display prose, which no signature can reject. Given that the
+// dangerous case is uncatchable by types either way, the simpler type wins
+// and the check lives where params are serialized. See examples/orders for a
+// test that type-switches over ErrorParams to assert it.
 //
 // Declare the implementation explicitly so a typo is caught at compile time:
 //

@@ -441,3 +441,44 @@ func TestLoadRejectsCyclicConfigTypeInsteadOfHanging(t *testing.T) {
 		t.Errorf("field = %q, want %q", cerr.Violations[0].Field, "node.Next")
 	}
 }
+
+// The asymmetry Load's doc comment now spells out, pinned by a test so the
+// doc cannot drift from it: a default: on a pointer SCALAR materializes the
+// pointer, while a default: on a field inside a pointer STRUCT block does
+// not materialize the block.
+func TestPointerScalarDefaultMaterializesButPointerBlockDefaultDoesNot(t *testing.T) {
+	t.Parallel()
+
+	type blk struct {
+		Mode string `env:"MODE" default:"strict"`
+	}
+	type cfg struct {
+		Retries *int `env:"RETRIES" default:"3"`
+		Block   *blk `envPrefix:"BLK_"`
+	}
+
+	got, err := config.Load[cfg](config.WithSource(mapSource(nil)))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if got.Retries == nil {
+		t.Fatal("Retries is nil; a default: on a pointer scalar must materialize it")
+	}
+	if *got.Retries != 3 {
+		t.Errorf("*Retries = %d, want 3", *got.Retries)
+	}
+	if got.Block != nil {
+		t.Errorf("Block = %+v, want nil; a default: inside an optional block must not materialize the block", got.Block)
+	}
+
+	// ...and once any key in the block's subtree is set, the block appears
+	// and its defaults do apply.
+	got, err = config.Load[cfg](config.WithSource(mapSource(map[string]string{"BLK_MODE": "loose"})))
+	if err != nil {
+		t.Fatalf("Load with the block present: %v", err)
+	}
+	if got.Block == nil || got.Block.Mode != "loose" {
+		t.Errorf("Block = %+v, want Mode=loose", got.Block)
+	}
+}

@@ -37,8 +37,28 @@ type validatable interface {
 // Load decodes T from the environment, validates it, and returns it.
 //
 // Every field must carry an env tag (or envPrefix, for a nested struct);
-// there is no inference from field names. A field with no default: tag is
-// required, and its absence fails the load.
+// there is no inference from field names.
+//
+// A field is required unless something makes it optional, and two things do:
+// a default: tag, which supplies a value when the variable is absent, and a
+// pointer type, whose nil zero value already means "not set". A non-pointer
+// field with no default: tag is required, and its absence fails the load.
+//
+// Pointers are optional at two levels, and the two differ in one way worth
+// knowing before it surprises you:
+//
+//   - a default: on a pointer SCALAR materializes it. *int with
+//     default:"3" is a non-nil pointer to 3 when the variable is unset.
+//   - a default: on a field inside a pointer STRUCT block does NOT
+//     materialize the block. A block exists only when the Source actually
+//     holds one of its keys; otherwise it stays nil and the defaults inside
+//     it never apply. If defaults counted as presence, a block containing
+//     any defaulted field could never be absent, which is the whole point of
+//     an optional block.
+//
+// Both are intentional. A pointer scalar's default is the value to use when
+// the operator said nothing; an optional block's defaults are the values to
+// use once the operator has opted the block in.
 //
 // Load reports every problem it finds at once rather than stopping at the
 // first, so an operator sees the whole list in one restart. On any error it

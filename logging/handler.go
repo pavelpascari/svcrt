@@ -14,6 +14,12 @@ import (
 //
 // An Extractor runs on every record, so it must be cheap and must not block.
 // Returning nil is fine and contributes nothing.
+//
+// It must also not panic. Nothing here recovers: a panicking Extractor
+// propagates out of the log call and into whatever was being logged, which
+// for the HTTP middleware means the request. An Extractor that reads a value
+// of uncertain shape out of a context should type-assert with the two-result
+// form and return nil, not assume a sandbox that does not exist.
 type Extractor func(context.Context) []slog.Attr
 
 // op is a deferred WithAttrs or WithGroup call.
