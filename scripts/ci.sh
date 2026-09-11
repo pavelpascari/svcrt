@@ -28,4 +28,10 @@ for i in $imports; do
   [ "$i" = "context" ] || fail "contract imports $i; only \"context\" is permitted"
 done
 
+# The example depends on three unpublished modules, so unlike the libraries it
+# runs WITH the workspace. This is the one place go.work is load-bearing.
+echo "== examples/orders =="
+(cd examples/orders && go vet ./...) || fail "examples/orders: go vet"
+(cd examples/orders && go test -race ./...) || fail "examples/orders: go test"
+
 echo "OK"
