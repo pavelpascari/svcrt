@@ -73,19 +73,103 @@ func TestAcceptanceUnknownOrderReturns404WithCodeEnvelope(t *testing.T) {
 }
 
 // The whole point of the codes-not-prose rule: no server-authored sentence
-// reaches the client.
+// reaches the client, on any status this handler can produce.
 func TestAcceptanceErrorBodyCarriesNoProse(t *testing.T) {
 	t.Parallel()
 
 	h, _ := newTestServer(t)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/orders/nope", nil))
 
-	body := rec.Body.String()
-	for _, prose := range []string{"not found", "Order", "missing"} {
-		if strings.Contains(body, prose) {
-			t.Errorf("body %q contains display prose %q", body, prose)
+	cases := []struct {
+		name  string
+		path  string
+		prose []string
+	}{
+		{"404 order_not_found", "/orders/nope", []string{"not found", "Order", "missing"}},
+		{"400 id_too_long", "/orders/aaaaaaaaaaaaaaaaaaaa", []string{"exceeds", "id length"}},
+	}
+
+	for _, tc := range cases {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", tc.path, nil))
+
+		body := rec.Body.String()
+		for _, prose := range tc.prose {
+			if strings.Contains(body, prose) {
+				t.Errorf("%s: body %q contains display prose %q", tc.name, body, prose)
+			}
 		}
+	}
+
+	// No fixture reaches writeError's non-Coded path over HTTP -- every error
+	// the service and its middleware chain can raise implements
+	// contract.Coded. writeError is called directly, as
+	// TestWriteErrorUncodedIsA500WithoutLeakingTheCause does, so the same
+	// no-prose rule is proven for the 500 path too.
+	var buf bytes.Buffer
+	log := logging.New(&buf, logging.Options{Level: slog.LevelDebug})
+	rec := httptest.NewRecorder()
+	writeError(rec, log, opaqueError{})
+
+	if body := rec.Body.String(); strings.Contains(body, "10.0.0.5") {
+		t.Errorf("500 body %q leaks the underlying cause", body)
+	}
+}
+
+// opaqueError is not contract.Coded, standing in for a raw dependency
+// failure -- a database dial error, say -- that must never reach the wire.
+type opaqueError struct{}
+
+func (opaqueError) Error() string { return "dial tcp 10.0.0.5:5432: connection refused" }
+
+// This is the branch that stops a raw database string, hostname, or stack
+// detail from reaching a caller. Each of its four properties can regress
+// independently, so each gets its own assertion: the status is 500, the
+// body's code is the generic "internal", the body does not contain the
+// original error's text, and the log output does contain the cause --
+// silently swallowing it would be its own defect.
+func TestWriteErrorUncodedIsA500WithoutLeakingTheCause(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	log := logging.New(&buf, logging.Options{Level: slog.LevelDebug})
+	rec := httptest.NewRecorder()
+
+	writeError(rec, log, opaqueError{})
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+
+	var env struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode body %q: %v", rec.Body, err)
+	}
+	if env.Error.Code != "internal" {
+		t.Errorf("code = %q, want internal", env.Error.Code)
+	}
+
+	if body := rec.Body.String(); strings.Contains(body, "10.0.0.5") {
+		t.Errorf("body %q leaks the cause (%q)", body, opaqueError{}.Error())
+	}
+
+	if logs := buf.String(); !strings.Contains(logs, "10.0.0.5") {
+		t.Errorf("log output %q does not contain the cause; a swallowed cause is its own defect", logs)
+	}
+}
+
+// statusFor's default arm is reachable only by a Coded error whose code is
+// missing from the switch. That is distinct from the non-Coded path above:
+// writeError's non-Coded branch returns 500 unconditionally and never calls
+// statusFor at all.
+func TestStatusForDefaultsToInternalServerErrorForUnregisteredCode(t *testing.T) {
+	t.Parallel()
+
+	if got := statusFor("unregistered_code"); got != http.StatusInternalServerError {
+		t.Errorf("statusFor(unregistered_code) = %d, want %d", got, http.StatusInternalServerError)
 	}
 }
 
