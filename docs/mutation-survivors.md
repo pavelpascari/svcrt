@@ -127,20 +127,29 @@ first construct in the file). Not something a test can address.
 
 ## `logging` Module
 
-**Mutation Score: 0.80 (20/25), below the project-wide 0.85 default -- this
-module has its own 0.80 floor in `scripts/mutation.sh` (see the `case`
-statement there). The 5 surviving mutants, identified by the mutant id
+**Mutation Score: 0.837838 (31/37), below the project-wide 0.85 default --
+this module has its own 0.80 floor in `scripts/mutation.sh` (see the `case`
+statement there). The 6 surviving mutants, identified by the mutant id
 `go-mutesting` itself reports (confirmed with
 `go-mutesting --do-not-remove-tmp-folder ./...`, deterministic across
 repeated runs), are `handler.go.4`, `handler.go.7`, `handler.go.14`,
-`handler.go.15`, and `logging.go.0` -- all verified equivalent below.**
-Run `./scripts/mutation.sh logging` for the current score and mutant total.
+`handler.go.15`, `logging.go.0`, and `middleware.go.6` -- all verified
+equivalent below.** Run `./scripts/mutation.sh logging` for the current
+score and mutant total.
 
-`logging` is a small module (25 total mutants, versus `config`'s 221), so a
-handful of equivalent mutants moves its score far more than the same count
-would move a larger module's. `config` reaches 0.977 with 5 equivalents
-diluted across 221 mutants; the same *shape* of equivalents here, diluted
-across only 25, caps the achievable score at 0.80. The binding rule is still
+Task 11 added `middleware.go` (12 new mutants, one of them -- `.6` --
+equivalent, documented in its own section below); the other 5 survivors
+predate it and are unchanged. The total mutant count rose from 25 to 37 and
+the score rose from 0.80 to 0.837838, consistent with the fixed count of
+equivalents (now 6) being diluted across a larger total, not a regression.
+
+`logging` is a small module (37 total mutants as of Task 11's middleware,
+versus `config`'s 221), so a handful of equivalent mutants moves its score
+far more than the same count would move a larger module's. `config` reaches
+0.977 with 5 equivalents diluted across 221 mutants; the same *shape* of
+equivalents here, diluted across a much smaller total, caps the achievable
+score at 0.80 -- the floor recorded in `scripts/mutation.sh` is a tripwire
+set below the historical low, not a target. The binding rule is still
 the one `config` established: every surviving mutant is either killed by a
 new test or justified here with a specific, verified argument, identified
 by its actual mutant id -- never "defensive programming," and never a
@@ -310,6 +319,63 @@ current documented behaviour, not a property of this package's own logic
 -- if `log/slog` ever changed its own default, this "equivalent" mutant
 would stop being equivalent. The line stays for that reason as much as for
 the doc-comment one.
+
+### `middleware.go.6`: `statusWriter.Write`'s redundant `w.status = http.StatusOK`
+
+```go
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if !w.written {
+		w.status = http.StatusOK
+		w.written = true
+	}
+	return w.ResponseWriter.Write(b)
+}
+```
+
+Mutant: replace the assignment `w.status = http.StatusOK` with a no-op
+reference to both operands (`_, _ = w.status, http.StatusOK`), leaving
+`w.written = true` untouched.
+
+**Why the line exists:** it makes the "implicit write means 200" rule
+readable at its point of effect, rather than relying on a reader to trace
+back to `Middleware`'s construction of the writer to see where the default
+comes from.
+
+**Why it's equivalent in behaviour:** `statusWriter.status` is initialized
+to `http.StatusOK` in `Middleware` (`&statusWriter{ResponseWriter: w,
+status: http.StatusOK}`) and is mutated nowhere else in the type except
+this line and `WriteHeader`'s own `w.status = code`, both of which are
+guarded by the identical `if !w.written` condition and both of which set
+`w.written = true` in the same guarded block. So the two write sites to
+`status` are mutually exclusive with respect to which one can fire first,
+and whichever fires first is gated by `!w.written` being true, which is
+only possible while `status` still holds its initial value (nothing else
+can have changed it without also having flipped `written`). Concretely: the
+body of `Write`'s guard only executes when `w.written` is still `false`,
+and by the invariant above that means `w.status` has not been written by
+`WriteHeader` either, so it is still exactly `http.StatusOK` -- the value
+already sitting there since construction. Overwriting it with the same
+value it already holds is unobservable.
+
+Tried the direct route: reproduced the mutant by hand (see below) and ran
+the full suite, including `TestMiddlewareIgnoresWriteHeaderAfterImplicitWrite`
+(added specifically to probe this exact guard's `w.written = true`
+companion assignment, which is a *real*, non-equivalent mutant --
+`middleware.go.1` and `middleware.go.7` in the same `go-mutesting` run,
+both killed by that test). With only the `w.status = http.StatusOK`
+assignment removed, every test still passes:
+
+```
+$ go test -race ./...
+ok  	github.com/pavelpascari/svcrt/logging	1.5s
+```
+
+This is the same "constant reassignment of an already-correct value" shape
+as `logging.go.0` above, not a new failure mode: the guard's *real* job --
+recording that a write happened at all, via `w.written = true` -- is
+covered and enforced by `TestMiddlewareIgnoresWriteHeaderAfterImplicitWrite`;
+only the redundant re-statement of the already-current default is
+equivalent.
 
 ### `slices.Clip` in `WithAttrs`/`WithGroup`: correct, but no mutator can see it
 
