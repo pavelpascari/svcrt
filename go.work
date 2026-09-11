@@ -1,3 +1,6 @@
 go 1.25
 
-use ./contract
+use (
+	./contract
+	./config
+)

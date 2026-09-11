@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 
 # Modules that must each stand alone with zero external dependencies.
 # Add each new library module here as it is created.
-MODULES=(contract)
+MODULES=(contract config)
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
