@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"testing/slogtest"
 	"time"
 
 	"github.com/pavelpascari/svcrt/logging"
@@ -452,5 +453,126 @@ func TestWithGroupClipPreventsSiblingOpsCorruption(t *testing.T) {
 	}
 	if !strings.Contains(lineRight, `"right":`) || strings.Contains(lineRight, `"left":`) {
 		t.Errorf(`right line missing its own "right" group or contains "left": %s`, lineRight)
+	}
+}
+
+// --- group correctness and stdlib conformance ---
+
+func TestExtractorAttrsStayTopLevelUnderWithGroup(t *testing.T) {
+	t.Parallel()
+
+	log, lines := capture(t, traceExtractor())
+	ctx := context.WithValue(context.Background(), ctxKey{}, "abc123")
+
+	log.WithGroup("req").InfoContext(ctx, "hello", "path", "/x")
+
+	got := lines()[0]
+
+	// The correlation key must be findable by name at the top level.
+	if got[logging.KeyTraceID] != "abc123" {
+		t.Errorf("top-level %s = %v, want abc123", logging.KeyTraceID, got[logging.KeyTraceID])
+	}
+	group, ok := got["req"].(map[string]any)
+	if !ok {
+		t.Fatalf("req = %#v, want a group object", got["req"])
+	}
+	if _, nested := group[logging.KeyTraceID]; nested {
+		t.Errorf("%s was nested inside the group: %#v", logging.KeyTraceID, group)
+	}
+	if group["path"] != "/x" {
+		t.Errorf("req.path = %v, want /x", group["path"])
+	}
+}
+
+func TestExtractorAttrsStayTopLevelUnderNestedGroups(t *testing.T) {
+	t.Parallel()
+
+	log, lines := capture(t, traceExtractor())
+	ctx := context.WithValue(context.Background(), ctxKey{}, "abc123")
+
+	log.WithGroup("a").WithGroup("b").InfoContext(ctx, "hello", "k", "v")
+
+	got := lines()[0]
+	if got[logging.KeyTraceID] != "abc123" {
+		t.Errorf("top-level %s missing: %#v", logging.KeyTraceID, got)
+	}
+	a, ok := got["a"].(map[string]any)
+	if !ok {
+		t.Fatalf("a = %#v, want a group", got["a"])
+	}
+	b, ok := a["b"].(map[string]any)
+	if !ok {
+		t.Fatalf("a.b = %#v, want a group", a["b"])
+	}
+	if b["k"] != "v" {
+		t.Errorf("a.b.k = %v, want v", b["k"])
+	}
+}
+
+func TestWithAttrsBeforeGroupStillPlacesExtractorAtTopLevel(t *testing.T) {
+	t.Parallel()
+
+	log, lines := capture(t, traceExtractor())
+	ctx := context.WithValue(context.Background(), ctxKey{}, "abc123")
+
+	log.With("service", "orders").WithGroup("req").InfoContext(ctx, "hello", "path", "/x")
+
+	got := lines()[0]
+	if got[logging.KeyTraceID] != "abc123" {
+		t.Errorf("top-level %s missing: %#v", logging.KeyTraceID, got)
+	}
+	if got["service"] != "orders" {
+		t.Errorf("service = %v, want orders", got["service"])
+	}
+}
+
+// TestHandler is the stdlib's own conformance suite for slog.Handler. It is
+// the reason hand-writing a Handler is acceptable here at all.
+func TestHandlerSatisfiesSlogtest(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	h := logging.NewHandler(slog.NewJSONHandler(&buf, nil))
+
+	results := func() []map[string]any {
+		var out []map[string]any
+		dec := json.NewDecoder(bytes.NewReader(buf.Bytes()))
+		for dec.More() {
+			m := map[string]any{}
+			if err := dec.Decode(&m); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			out = append(out, m)
+		}
+		return out
+	}
+
+	if err := slogtest.TestHandler(h, results); err != nil {
+		t.Errorf("slogtest.TestHandler: %v", err)
+	}
+}
+
+// The same suite with extractors attached, so the slow path is covered too.
+func TestHandlerWithExtractorsSatisfiesSlogtest(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	h := logging.NewHandler(slog.NewJSONHandler(&buf, nil), traceExtractor())
+
+	results := func() []map[string]any {
+		var out []map[string]any
+		dec := json.NewDecoder(bytes.NewReader(buf.Bytes()))
+		for dec.More() {
+			m := map[string]any{}
+			if err := dec.Decode(&m); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			out = append(out, m)
+		}
+		return out
+	}
+
+	if err := slogtest.TestHandler(h, results); err != nil {
+		t.Errorf("slogtest.TestHandler with extractors: %v", err)
 	}
 }
