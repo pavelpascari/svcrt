@@ -41,17 +41,21 @@ type Coded interface {
 // implement Coded alone. Values must be scalars — strings, numbers, or bools —
 // because a client substitutes them into a template it owns.
 //
-// That constraint is enforced at the serialization boundary and by review,
-// not by the compiler, and that is deliberate. Go cannot express a scalar
-// type-union as a map value type, so the honest options were map[string]any
-// or a hand-rolled Param wrapper type at every call site. The wrapper was
-// rejected because it does not catch the violation that actually happens:
-// the realistic mistake is not returning a struct, it is returning
-// {"reason": "quantity is too high"} — a perfectly scalar string that is
-// also display prose, which no signature can reject. Given that the
-// dangerous case is uncatchable by types either way, the simpler type wins
-// and the check lives where params are serialized. See examples/orders for a
-// test that type-switches over ErrorParams to assert it.
+// That constraint is a convention, not compiler-enforced, and that is
+// deliberate. Go cannot express a scalar type-union as a map value type, so
+// the honest options were map[string]any or a hand-rolled Param wrapper type
+// at every call site. The wrapper was rejected because it does not catch the
+// violation that actually happens: the realistic mistake is not returning a
+// struct, it is returning {"reason": "quantity is too high"} — a perfectly
+// scalar string that is also display prose, which no signature can reject.
+// Given that the dangerous case is uncatchable by types either way, the
+// simpler type wins.
+//
+// Today the convention is enforced by the type-switch test over the error
+// type (see TestIDTooLongErrorCarriesScalarParams in examples/orders) plus
+// review — nothing in svcrt validates it at runtime. Once generated code
+// exists, enforcement belongs at the emitted serialization boundary, which
+// can reject a non-scalar value there instead.
 //
 // Declare the implementation explicitly so a typo is caught at compile time:
 //

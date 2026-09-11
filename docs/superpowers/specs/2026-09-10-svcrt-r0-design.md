@@ -345,7 +345,7 @@ eliminates the "added a field, forgot the tag, it silently stayed zero" bug.
 
 ### 5.6 Decode pipeline
 
-Three stages, separating two error audiences:
+Four stages, separating two error audiences:
 
 1. **Plan** — reflect over `T` once, producing a flat list of bindings: field
    index path, full env key, decoder, default. Failures are *programmer*
@@ -725,8 +725,9 @@ affects R0:
 
 - **Q1** (parent) — optional vs. required for *request field binding*. R0
   answers the analogous question for `config` (§5.3: required by default,
-  `default:` opts out). Aligning the binding answer with it would give users one
-  dialect instead of two, but that decision belongs to G0.
+  `default:` or a pointer type opts out). Aligning the binding answer with it
+  would give users one dialect instead of two, but that decision belongs to
+  G0.
 - **D3** (parent) — whether `contract` freezes at G2. R0 ships `contract`
   unfrozen; §7.2's hand-written middleware exists to generate evidence for that
   decision.
