@@ -507,6 +507,12 @@ func TestExtractorAttrsStayTopLevelUnderNestedGroups(t *testing.T) {
 	if b["k"] != "v" {
 		t.Errorf("a.b.k = %v, want v", b["k"])
 	}
+	if _, nested := a[logging.KeyTraceID]; nested {
+		t.Errorf("%s leaked into the a group: %#v", logging.KeyTraceID, a)
+	}
+	if _, nested := b[logging.KeyTraceID]; nested {
+		t.Errorf("%s leaked into the a.b group: %#v", logging.KeyTraceID, b)
+	}
 }
 
 func TestWithAttrsBeforeGroupStillPlacesExtractorAtTopLevel(t *testing.T) {
@@ -523,6 +529,13 @@ func TestWithAttrsBeforeGroupStillPlacesExtractorAtTopLevel(t *testing.T) {
 	}
 	if got["service"] != "orders" {
 		t.Errorf("service = %v, want orders", got["service"])
+	}
+	req, ok := got["req"].(map[string]any)
+	if !ok {
+		t.Fatalf("req = %#v, want a group", got["req"])
+	}
+	if _, nested := req[logging.KeyTraceID]; nested {
+		t.Errorf("%s leaked into the req group: %#v", logging.KeyTraceID, req)
 	}
 }
 
