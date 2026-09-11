@@ -3,11 +3,23 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# Modules that must each stand alone with zero external dependencies.
-# Add each new library module here as it is created.
-MODULES=(contract config logging)
-
 fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# Library modules that must each stand alone with zero external dependencies.
+#
+# Derived from the go.mod files on disk rather than hand-listed: this list
+# used to be duplicated here and in release.sh, and two hand-kept copies is
+# how a module added at R1 ends up ungated with nobody noticing. Exemplars
+# live under examples/ and are deliberately excluded -- they depend on the
+# libraries and are handled separately below.
+MODULES=()
+for f in */go.mod; do
+  [ -f "$f" ] || continue
+  m=${f%/go.mod}
+  [ "$m" = "examples" ] && continue
+  MODULES+=("$m")
+done
+[ ${#MODULES[@]} -gt 0 ] || fail "no library modules found (expected */go.mod)"
 
 for m in "${MODULES[@]}"; do
   echo "== $m =="
@@ -18,7 +30,12 @@ for m in "${MODULES[@]}"; do
   (cd "$m" && GOWORK=off go test -race ./...) || fail "$m: go test"
 
   # Spec §8.2: zero requires. Exactly one line -- the module itself.
-  n=$(cd "$m" && GOWORK=off go list -m all | wc -l | tr -d ' ')
+  # Assigned inside `if !` so a go list failure reports through fail() with
+  # its label; a bare `n=$(...)` under set -e aborts before we get here and
+  # the operator is left guessing which module and which check broke.
+  if ! n=$(cd "$m" && GOWORK=off go list -m all | wc -l | tr -d ' '); then
+    fail "$m: go list -m all"
+  fi
   [ "$n" -eq 1 ] || fail "$m: has module dependencies ($n lines from 'go list -m all')"
 done
 
@@ -27,6 +44,16 @@ imports=$(cd contract && GOWORK=off go list -f '{{join .Imports "\n"}}' ./... | 
 for i in $imports; do
   [ "$i" = "context" ] || fail "contract imports $i; only \"context\" is permitted"
 done
+
+# contract's low `go` directive is a compatibility commitment, not an
+# accident: it is the module intended to freeze at v1 and be imported by every
+# generated service, so it must keep building on the oldest toolchain those
+# services might be on. `go mod tidy` or `go get` under a newer toolchain
+# rewrites that line silently, and nothing else in the repo would notice --
+# the workspace and CI both run a newer Go. Raising it is a deliberate,
+# breaking decision; make it here, on purpose.
+grep -q '^go 1\.22$' contract/go.mod ||
+  fail "contract/go.mod no longer declares 'go 1.22'; that floor is a deliberate compatibility commitment for the one module that freezes (spec §4). If raising it is intended, change it here too."
 
 # The example depends on three unpublished modules, so unlike the libraries it
 # runs WITH the workspace. This is the one place go.work is load-bearing.

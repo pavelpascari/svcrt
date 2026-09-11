@@ -43,7 +43,7 @@ func writeError(w http.ResponseWriter, log *slog.Logger, err error) {
 	if !errors.As(err, &coded) {
 		// An error that is not part of the API surface is a 500. The cause is
 		// logged and never serialized.
-		log.Error("unhandled error", "err", err)
+		log.Error("unhandled error", logging.KeyCode, "internal", "err", err)
 		writeJSON(w, http.StatusInternalServerError, envelopeFor("internal", nil))
 		return
 	}
@@ -54,7 +54,15 @@ func writeError(w http.ResponseWriter, log *slog.Logger, err error) {
 		params = detailed.ErrorParams()
 	}
 
-	writeJSON(w, statusFor(coded.ErrorCode()), envelopeFor(coded.ErrorCode(), params))
+	// logging.KeyCode is a well-known key precisely so a server-side line and
+	// the envelope the client received can be joined on the same value. Both
+	// branches here emit it, so every error response has a matching line.
+	// The params are deliberately not logged: they are already implied by the
+	// code, and logging them is how a Secret eventually ends up in a log.
+	code := coded.ErrorCode()
+	log.Info("request failed", logging.KeyCode, code)
+
+	writeJSON(w, statusFor(code), envelopeFor(code, params))
 }
 
 func envelopeFor(code string, params map[string]any) errorEnvelope {

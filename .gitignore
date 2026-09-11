@@ -1,2 +1,10 @@
 /report.json
 */report.json
+
+# `go build` output from an example's main package. The binary takes the
+# directory's name (e.g. examples/orders/orders), so this covers any future
+# example module the same way.
+examples/*/*
+!examples/*/*.go
+!examples/*/go.mod
+!examples/*/go.sum

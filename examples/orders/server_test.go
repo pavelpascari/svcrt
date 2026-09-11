@@ -269,3 +269,103 @@ func TestEmptyIDNeverReachesTheHandlerOverHTTP(t *testing.T) {
 		t.Errorf("body %q came from our handler; the mux should have rejected the route", body)
 	}
 }
+
+// Every response this handler produces is JSON, and a client that has to
+// sniff the body to find that out is a client we broke. Deleting the header
+// used to pass the whole suite, on both the success and the error path.
+func TestResponsesDeclareJSONContentType(t *testing.T) {
+	t.Parallel()
+
+	h, _ := newTestServer(t)
+
+	cases := []struct {
+		name, path string
+		wantStatus int
+	}{
+		{"success", "/orders/1", http.StatusOK},
+		{"error", "/orders/nope", http.StatusNotFound},
+	}
+
+	for _, tc := range cases {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", tc.path, nil))
+
+		if rec.Code != tc.wantStatus {
+			t.Fatalf("%s: status = %d, want %d", tc.name, rec.Code, tc.wantStatus)
+		}
+		if got := rec.Header().Get("Content-Type"); got != "application/json" {
+			t.Errorf("%s: Content-Type = %q, want application/json", tc.name, got)
+		}
+	}
+}
+
+// RejectLongID(8) caps the id at 8, so 8 is accepted and 9 is not. Only the
+// accepted-at-exactly-max case distinguishes `>` from `>=`, and nothing
+// exercised it: every other test used an id far past the limit.
+func TestIDLengthBoundaryAtExactlyMax(t *testing.T) {
+	t.Parallel()
+
+	h, _ := newTestServer(t)
+
+	cases := []struct {
+		name, id   string
+		wantStatus int
+		wantCode   string
+	}{
+		{"exactly max is accepted", "12345678", http.StatusNotFound, "order_not_found"},
+		{"one over max is rejected", "123456789", http.StatusBadRequest, "id_too_long"},
+	}
+
+	for _, tc := range cases {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", "/orders/"+tc.id, nil))
+
+		if rec.Code != tc.wantStatus {
+			t.Errorf("%s (id %q, len %d): status = %d, want %d",
+				tc.name, tc.id, len(tc.id), rec.Code, tc.wantStatus)
+		}
+
+		var env struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+			t.Fatalf("%s: decode body %q: %v", tc.name, rec.Body, err)
+		}
+		if env.Error.Code != tc.wantCode {
+			t.Errorf("%s: code = %q, want %q", tc.name, env.Error.Code, tc.wantCode)
+		}
+	}
+}
+
+// logging.KeyCode had no producer anywhere in the repo. A well-known key
+// nobody writes is a convention nobody follows, so writeError emits it on
+// both of its branches -- which is also what lets an operator join a
+// server-side line to the envelope a client received.
+func TestWriteErrorLogsTheErrorCodeUnderTheWellKnownKey(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		err      error
+		wantCode string
+	}{
+		{"coded", notFoundError{id: "nope"}, "order_not_found"},
+		{"uncoded", opaqueError{}, "internal"},
+	}
+
+	for _, tc := range cases {
+		var buf bytes.Buffer
+		log := logging.New(&buf, logging.Options{Level: slog.LevelDebug})
+		writeError(httptest.NewRecorder(), log, tc.err)
+
+		line := map[string]any{}
+		if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &line); err != nil {
+			t.Fatalf("%s: decode log %q: %v", tc.name, buf.String(), err)
+		}
+		if line[logging.KeyCode] != tc.wantCode {
+			t.Errorf("%s: %s = %v, want %q", tc.name, logging.KeyCode, line[logging.KeyCode], tc.wantCode)
+		}
+	}
+}

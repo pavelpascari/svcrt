@@ -1,9 +1,23 @@
 # svcrt R0 — `contract`, `config`, `logging`
 
-**Status:** approved design, ready for implementation planning
+**Status:** approved design, implemented at R0 with the corrections noted below
 **Date:** 2026-09-10
 **Scope:** milestone R0 of the svcgen/svcrt spec v0.2
 **Parent spec:** svcgen/svcrt v0.2 (§7, §9, §12)
+
+### Corrections applied during R0
+
+Implementation contradicted this document in four places. Each has been
+amended **in place** in the section named, with the correction marked. This
+document remains the binding authority; where it once disagreed with the
+code, the code was right and the text was stale.
+
+| Where | What changed |
+|---|---|
+| §5.3 | `default:` is **not** the only way to make a field optional — a pointer type is optional by virtue of being a pointer. Plus the pointer-scalar / pointer-block default asymmetry. |
+| §5.4 | A nested struct with **no** `envPrefix` tag is a `KindSchema` violation, not a flat embed. `envPrefix:""` is the flat embed. |
+| §5.6 | `Validate()` runs only when stages 1–3 produced no violations, so the worked example mixing `KindValidate` with `KindRequired`/`KindDecode` was unproducible. Replaced with the reachable form. |
+| §6.6, §7.2, §7.3 | Cosmetic: the logged route is `GET /orders/{id}` (`r.Pattern` includes the method), and the acceptance test file is `server_test.go`. |
 
 ---
 
@@ -247,8 +261,20 @@ explicitly name in `main`.
 
 ### 5.3 Required vs. optional
 
-**A field with no `default:` tag is required.** Absence at boot is a fatal
-error. `default:"..."` is the only way to make a field optional.
+**A field is required unless something makes it optional.** Absence at boot is
+a fatal error. Two things make a field optional:
+
+1. `default:"..."`, which supplies a value when the variable is absent; and
+2. **a pointer type**, whose nil zero value already means "not set".
+
+> **Corrected during R0.** This section originally said `default:"..."` was
+> the *only* way to make a field optional, which contradicted its own
+> `Debug *bool` example below and failed three of the plan's own tests.
+> Pointer-means-optional wins: it is the entire purpose of the tri-state
+> affordance, and it makes the rule uniform with §5.4, where a `*Struct` is
+> already an optional block. Pointer ⇒ optional, at both levels. The cost is
+> that a pointer field can never be mandatory; use a value type to require
+> one, which is the clearer expression anyway.
 
 There is no `required` keyword. Making the safe case the default means it
 cannot be forgotten; the widely-used inverse (`env:"X,required"`) has a failure
@@ -267,13 +293,28 @@ type AppConfig struct {
 }
 ```
 
+**The two pointer levels differ in one way, deliberately.** A `default:` on a
+pointer *scalar* materializes it: `Retries *int` with `default:"3"` is a
+non-nil pointer to 3 when the variable is unset. A `default:` on a field
+inside a pointer *struct block* does **not** materialize the block — see
+§5.4's presence rule below. A pointer scalar's default is the value to use
+when the operator said nothing; an optional block's defaults are the values to
+use once the operator has opted the block in.
+
 ### 5.4 Nesting
 
 - **Prefixes compose transitively.** `envPrefix:"OTEL_"` on a field whose own
   struct declares `envPrefix:"EXPORTER_"` internally yields
   `OTEL_EXPORTER_ENDPOINT`.
-- **A nested struct with no `envPrefix` adds no prefix.** This is how a module
-  ships a config fragment that embeds flat.
+- **`envPrefix:""` — present but empty — adds no prefix.** This is how a
+  module ships a config fragment that embeds flat.
+
+  > **Corrected during R0.** This bullet originally read "a nested struct
+  > with no `envPrefix` adds no prefix". A *missing* tag is a `KindSchema`
+  > violation, consistent with §5.5: an untagged field is never a silent
+  > anything. `reflect.StructTag.Lookup` distinguishes absent from
+  > present-but-empty, so opting into a flat embed is explicit and a
+  > forgotten tag still fails the boot.
 - **A `*Struct` is an optional block.** If no variable in its subtree is set,
   it stays `nil` and its required fields are not enforced. If any variable in
   its subtree is set, the block is decoded and its required fields *are*
@@ -304,7 +345,7 @@ eliminates the "added a field, forgot the tag, it silently stayed zero" bug.
 
 ### 5.6 Decode pipeline
 
-Three stages, separating two error audiences:
+Four stages, separating two error audiences:
 
 1. **Plan** — reflect over `T` once, producing a flat list of bindings: field
    index path, full env key, decoder, default. Failures are *programmer*
@@ -312,21 +353,45 @@ Three stages, separating two error audiences:
    fields resolving to the same env key.
 2. **Resolve** — call `Source(key)`; else use `default:`; else record
    `KindRequired`.
-3. **Decode** — raw string to typed value (`KindDecode`), then `Validate()
-   error` if `T` or `*T` implements it (`KindValidate`).
+3. **Decode** — raw string to typed value (`KindDecode`).
+4. **Validate** — `Validate() error` if `T` or `*T` implements it
+   (`KindValidate`).
 
-All three stages accumulate. `Load` never returns after the first problem —
-parent §9's "fails fast with every violation reported at once, not one per
-restart."
+Stages accumulate *within their tier*, and the tiers gate each other:
+
+- **Stage 1 gates everything.** A schema violation makes the type unloadable
+  under any environment, so reporting missing values alongside it would be
+  noise. If stage 1 reports anything, `Load` returns those violations alone.
+- **Stages 2 and 3 accumulate together.** Every key is resolved and every
+  present value decoded before `Load` returns, so an operator sees the whole
+  list in one restart — parent §9's "fails fast with every violation reported
+  at once, not one per restart."
+- **Stage 4 runs only if stages 1–3 produced nothing.** Handing user code a
+  half-decoded struct would make `Validate` reason about fields that were
+  never populated, producing cascading nonsense on top of the real errors.
+
+> **Corrected during R0.** The worked example below showed three problems,
+> mixing a `KindValidate` line with `KindRequired` and `KindDecode` lines.
+> Given the gating above, that combination is **unproducible** — a reader who
+> tested it against the code would conclude the code was broken. It has been
+> replaced with the reachable two-problem form, which is the project's actual
+> golden file (`config/testdata/aggregated.golden`).
 
 Violations are ordered by field declaration order, so output is stable and
 golden-testable.
 
 ```
-config: 3 problems
-  DATABASE_URL (AppConfig.DBURL): required, not set
-  PORT (AppConfig.Port): invalid int: parsing "abc": invalid syntax
-  AppConfig: TLS_KEY required when TLS_CERT is set
+config: 2 problems
+  DATABASE_URL (cfg.DBURL): required, not set
+  PORT (cfg.Port): invalid int: parsing "abc": invalid syntax
+```
+
+A `KindValidate` failure appears alone, because it is only reachable when
+nothing else failed:
+
+```
+config: 1 problem
+  cfg: TLS_KEY required when TLS_CERT is set
 ```
 
 `*Error` implements `Unwrap() []error` so `errors.Is`/`errors.As` reach
@@ -514,8 +579,9 @@ Logs one line per request at completion: `method`, `route`, `status`,
 `duration_ms`.
 
 **Route, not path.** It uses `(*http.Request).Pattern` (Go 1.23+, populated by
-`net/http.ServeMux`), so a log line carries `/orders/{id}` rather than
-`/orders/8a3f...`. This bounds log cardinality the same way parent §8.3 bounds
+`net/http.ServeMux`), so a log line carries `GET /orders/{id}` rather than
+`/orders/8a3f...`. `r.Pattern` includes the method, and it is logged
+verbatim. This bounds log cardinality the same way parent §8.3 bounds
 metric cardinality.
 
 `Pattern` is documented as empty when the request was not matched against a
@@ -564,7 +630,7 @@ examples/orders/
                   defaulted, *bool, optional *TLSConfig block
   orders.go       service + orderNotFound implementing contract.Coded
   middleware.go   contract.Middleware[GetOrderRequest, *Order]
-  main_test.go    acceptance test
+  server_test.go  acceptance test
 ```
 
 `middleware.go` and the `Coded` error exist as pressure on `contract`:
@@ -584,8 +650,8 @@ One test, composing all three modules:
 1. `GET /orders/{id}` for a known id returns 200 and the expected body.
 2. `GET /orders/{id}` for an unknown id returns 404 with body
    `{"error":{"code":"order_not_found"}}`.
-3. The captured log output contains a line with `route=/orders/{id}` and the
-   corresponding status.
+3. The captured log output contains a line with `route=GET /orders/{id}` and
+   the corresponding status.
 
 **R0 is done when this test passes and the CI assertions in §8 hold.**
 
@@ -659,8 +725,9 @@ affects R0:
 
 - **Q1** (parent) — optional vs. required for *request field binding*. R0
   answers the analogous question for `config` (§5.3: required by default,
-  `default:` opts out). Aligning the binding answer with it would give users one
-  dialect instead of two, but that decision belongs to G0.
+  `default:` or a pointer type opts out). Aligning the binding answer with it
+  would give users one dialect instead of two, but that decision belongs to
+  G0.
 - **D3** (parent) — whether `contract` freezes at G2. R0 ships `contract`
   unfrozen; §7.2's hand-written middleware exists to generate evidence for that
   decision.

@@ -51,19 +51,35 @@ func Middleware(l *slog.Logger) func(http.Handler) http.Handler {
 			start := time.Now()
 			sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 
+			// Deferred so the line is emitted even when the handler panics.
+			// The request that crashed is the one most worth having in the
+			// access log, and an undeferred call skips exactly that case.
+			//
+			// The panic is deliberately NOT recovered here: whether a panic
+			// becomes a 500 or takes the process down is the service
+			// author's decision, made in their own middleware. This one only
+			// makes sure it is not also invisible.
+			defer func() {
+				attrs := make([]slog.Attr, 0, 4)
+				attrs = append(attrs, slog.String(KeyMethod, r.Method))
+				if r.Pattern != "" {
+					attrs = append(attrs, slog.String(KeyRoute, r.Pattern))
+				}
+				// sw.written is false when the handler panicked before writing
+				// anything: net/http sends no response at all in that case, so
+				// sw.status's optimistic 200 default is not what happened. Omit
+				// the attribute rather than claim a status nobody received -- a
+				// 500 would be just as invented, since the client saw a dropped
+				// connection, not a server error response.
+				if sw.written {
+					attrs = append(attrs, slog.Int(KeyStatus, sw.status))
+				}
+				attrs = append(attrs, slog.Int64(KeyDurMS, time.Since(start).Milliseconds()))
+
+				l.LogAttrs(r.Context(), slog.LevelInfo, "http request", attrs...)
+			}()
+
 			next.ServeHTTP(sw, r)
-
-			attrs := make([]slog.Attr, 0, 4)
-			attrs = append(attrs, slog.String(KeyMethod, r.Method))
-			if r.Pattern != "" {
-				attrs = append(attrs, slog.String(KeyRoute, r.Pattern))
-			}
-			attrs = append(attrs,
-				slog.Int(KeyStatus, sw.status),
-				slog.Int64(KeyDurMS, time.Since(start).Milliseconds()),
-			)
-
-			l.LogAttrs(r.Context(), slog.LevelInfo, "http request", attrs...)
 		})
 	}
 }

@@ -15,7 +15,10 @@ never owns your process — you write `main()`.
 | `config` | Decodes environment variables into a struct once, at construction, reporting every violation at once. |
 | `logging` | A `slog.Handler` that enriches records from their context, plus shared attribute-key conventions. |
 
-Each is versioned independently: `contract/v1.0.0`, `config/v0.1.0`.
+Each is versioned independently, with a per-module tag prefix —
+`contract/v0.1.0`, `config/v0.1.0`. `contract` is *intended* to freeze at v1
+once generated code exists to prove its shape, but that decision is still open
+(design spec §10, D3) and it is not tagged v1 yet.
 
 ## Quick start
 
@@ -43,8 +46,13 @@ See `examples/orders` for a complete service.
 
 ```sh
 ./scripts/ci.sh                        # test every module in isolation
-./scripts/release.sh contract v1.0.0   # tag one module
+./scripts/mutation.sh                  # mutation gate, every module
+./scripts/release.sh contract v0.1.0   # tag one module
 ```
+
+`docs/conventions.md` records the decisions R0 made by doing rather than by
+writing down — option shapes, what `Middleware` means, when to delete a clause
+versus keep and test it, and why a supplied test suite is a floor.
 
 `go.work` is a local convenience. CI runs the library modules with
 `GOWORK=off`, because the workspace masks the version skew consumers would hit.

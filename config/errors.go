@@ -14,8 +14,8 @@ const (
 	// resolving to the same environment key. No environment can satisfy it.
 	KindSchema ViolationKind = iota
 
-	// KindRequired is an operator error: a field with no default: tag whose
-	// environment variable is not set.
+	// KindRequired is an operator error: a field with no default: tag and no
+	// pointer type whose environment variable is not set.
 	KindRequired
 
 	// KindDecode is an operator error: a value that is set but cannot be
