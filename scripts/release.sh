@@ -3,11 +3,21 @@
 # this exists at R0 rather than R1: three modules already means three prefixes,
 # and the script is much easier to write now than at six.
 #
-#   scripts/release.sh contract v1.0.0   ->  tag contract/v1.0.0
+#   scripts/release.sh contract v0.1.0   ->  tag contract/v0.1.0
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-MODULES=(contract config logging)
+# Derived from the go.mod files on disk, not hand-listed. This list and
+# ci.sh's used to be two hand-kept copies of the same thing, which is how a
+# module added later ends up ungated -- or, here, untaggable -- with nobody
+# noticing. Exemplars under examples/ are excluded: they are not released.
+MODULES=()
+for f in */go.mod; do
+  [ -f "$f" ] || continue
+  m=${f%/go.mod}
+  [ "$m" = "examples" ] && continue
+  MODULES+=("$m")
+done
 
 usage() {
   echo "usage: $0 <module> <version>" >&2
@@ -47,7 +57,12 @@ fi
 echo "verifying $module in isolation..."
 (cd "$module" && GOWORK=off go vet ./...)
 (cd "$module" && GOWORK=off go test -race ./...)
-n=$(cd "$module" && GOWORK=off go list -m all | wc -l | tr -d ' ')
+# Assigned inside `if !` so a go list failure reports here rather than
+# aborting through errexit with no explanation of which check failed.
+if ! n=$(cd "$module" && GOWORK=off go list -m all | wc -l | tr -d ' '); then
+  echo "$module: 'go list -m all' failed; refusing to tag" >&2
+  exit 1
+fi
 [ "$n" -eq 1 ] || { echo "$module has module dependencies; refusing to tag" >&2; exit 1; }
 
 git tag -a "$tag" -m "$tag"
