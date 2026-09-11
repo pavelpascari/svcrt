@@ -654,9 +654,19 @@ func BenchmarkWithExtractorAndWith(b *testing.B) {
 // The benchmarks above report the cost; this asserts it, so a revert is
 // caught by `go test` rather than by someone remembering to read a
 // benchmark. It compares against plain slog rather than against a literal 0
-// because the race detector allocates on its own -- the claim is "svcrt costs
-// nothing extra", and that is what is measured.
+// because the two measurements can otherwise drift for reasons unrelated to
+// svcrt -- the claim is "svcrt costs nothing extra", and that is what is
+// measured. Under the race detector the assertion is skipped entirely: see
+// the t.Skip below for why.
 func TestNoExtractorWithAttrsCostsNothingExtraPerRecord(t *testing.T) {
+	if raceDetectorEnabled {
+		t.Skip("testing.AllocsPerRun is unreliable under -race: the race " +
+			"detector's own bookkeeping allocates, and those allocations " +
+			"vary between the two AllocsPerRun measurements enough to flip " +
+			"the ours > plain comparison. The assertion still runs in the " +
+			"non-race build.")
+	}
+
 	ctx := context.Background()
 	measure := func(h slog.Handler) float64 {
 		return testing.AllocsPerRun(100, func() {
