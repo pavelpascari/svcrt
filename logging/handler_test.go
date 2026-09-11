@@ -353,3 +353,104 @@ func TestSlowPathSkipsWithAttrsWhenExtractorContributesNothing(t *testing.T) {
 		t.Errorf("next.WithAttrs called %d times for an extractor that contributed nothing", calls)
 	}
 }
+
+// TestWithAttrsClipPreventsSiblingOpsCorruption proves slices.Clip in
+// WithAttrs is load-bearing, not defensive dead weight. Chaining WithAttrs
+// grows h.ops's backing array past exact-fit capacity (Go's own append
+// growth leaves slack well before 18 single-op appends -- empirically
+// confirmed: len 3 already has cap 4). Once a handler's ops slice has that
+// slack, branching two children off it with append(h.ops, ...) (no Clip)
+// makes both children's appends target the SAME index in the shared array;
+// whichever branch is taken second silently overwrites the first branch's
+// op. Clip forces each branch to allocate its own array instead.
+func TestWithAttrsClipPreventsSiblingOpsCorruption(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	mid := logging.NewHandler(slog.NewJSONHandler(&buf, nil))
+	for i := 0; i < 18; i++ {
+		mid = mid.WithAttrs([]slog.Attr{slog.Int(fmt.Sprintf("p%d", i), i)})
+	}
+
+	// Two siblings derived from the SAME parent, with different attrs.
+	// Both derivations happen before either is used, so a shared,
+	// unclipped backing array would let the second overwrite the first.
+	left := mid.WithAttrs([]slog.Attr{slog.String("branch", "left")})
+	right := mid.WithAttrs([]slog.Attr{slog.String("branch", "right")})
+
+	if err := left.Handle(context.Background(), slog.NewRecord(time.Now(), slog.LevelInfo, "hello", 0)); err != nil {
+		t.Fatalf("left.Handle: %v", err)
+	}
+	if err := right.Handle(context.Background(), slog.NewRecord(time.Now(), slog.LevelInfo, "hello", 0)); err != nil {
+		t.Fatalf("right.Handle: %v", err)
+	}
+
+	dec := json.NewDecoder(&buf)
+	var lineLeft, lineRight map[string]any
+	if err := dec.Decode(&lineLeft); err != nil {
+		t.Fatalf("decode left line: %v", err)
+	}
+	if err := dec.Decode(&lineRight); err != nil {
+		t.Fatalf("decode right line: %v", err)
+	}
+
+	if lineLeft["branch"] != "left" {
+		t.Errorf("left branch = %v, want left (sibling ops slice was overwritten)", lineLeft["branch"])
+	}
+	if lineRight["branch"] != "right" {
+		t.Errorf("right branch = %v, want right", lineRight["branch"])
+	}
+}
+
+// TestWithGroupClipPreventsSiblingOpsCorruption is
+// TestWithAttrsClipPreventsSiblingOpsCorruption's counterpart for
+// WithGroup, which appends to the same h.ops slice and needs the same
+// slices.Clip protection.
+func TestWithGroupClipPreventsSiblingOpsCorruption(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	mid := logging.NewHandler(slog.NewJSONHandler(&buf, nil))
+	for i := 0; i < 18; i++ {
+		mid = mid.WithGroup(fmt.Sprintf("g%d", i))
+	}
+
+	// Deliberately do NOT chain a further WithAttrs/WithGroup call onto
+	// left/right: that call's own (correctly-clipped) append would copy
+	// the vulnerable op out of the shared array before the sibling gets
+	// a chance to corrupt it, masking exactly the bug this test targets.
+	// Instead, give each its own attr via the Record itself at Handle
+	// time -- a group nests a record's own attrs the same way it nests
+	// WithAttrs-attached ones.
+	left := mid.WithGroup("left")
+	right := mid.WithGroup("right")
+
+	recLeft := slog.NewRecord(time.Now(), slog.LevelInfo, "hello", 0)
+	recLeft.AddAttrs(slog.String("k", "v"))
+	if err := left.Handle(context.Background(), recLeft); err != nil {
+		t.Fatalf("left.Handle: %v", err)
+	}
+
+	recRight := slog.NewRecord(time.Now(), slog.LevelInfo, "hello", 0)
+	recRight.AddAttrs(slog.String("k", "v"))
+	if err := right.Handle(context.Background(), recRight); err != nil {
+		t.Fatalf("right.Handle: %v", err)
+	}
+
+	// left/right nest 18 levels deep (WithGroup nests each subsequent
+	// group inside the last), so check by substring rather than by
+	// decoding into a shallow map -- what matters here is which group
+	// name shows up in which line, not its exact nesting depth.
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2: %v", len(lines), lines)
+	}
+	lineLeft, lineRight := lines[0], lines[1]
+
+	if !strings.Contains(lineLeft, `"left":`) || strings.Contains(lineLeft, `"right":`) {
+		t.Errorf(`left line missing its own "left" group or contains "right" (sibling ops slice was overwritten): %s`, lineLeft)
+	}
+	if !strings.Contains(lineRight, `"right":`) || strings.Contains(lineRight, `"left":`) {
+		t.Errorf(`right line missing its own "right" group or contains "left": %s`, lineRight)
+	}
+}
