@@ -15,3 +15,6 @@ func (s *Server) CloseListenerForTest() {
 		_ = ln.Close()
 	}
 }
+
+// CheckTimeoutForTest exposes the per-readiness-check timeout for assertions.
+func CheckTimeoutForTest() time.Duration { return checkTimeout }

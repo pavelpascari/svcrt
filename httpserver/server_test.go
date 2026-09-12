@@ -171,6 +171,14 @@ func TestReadHeaderTimeoutIsNeverZero(t *testing.T) {
 	}
 }
 
+func TestReadHeaderTimeoutDefaultIsTenSeconds(t *testing.T) {
+	t.Parallel()
+	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{Addr: "127.0.0.1:0"})
+	if d := s.ReadHeaderTimeoutForTest(); d != 10*time.Second {
+		t.Errorf("ReadHeaderTimeout default = %v, want 10s", d)
+	}
+}
+
 func TestExplicitReadHeaderTimeoutIsKept(t *testing.T) {
 	t.Parallel()
 	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{
@@ -210,5 +218,55 @@ func TestShutdownBeforeStartIsANoOp(t *testing.T) {
 	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{Addr: "127.0.0.1:0"})
 	if err := s.Shutdown(context.Background()); err != nil {
 		t.Errorf("Shutdown before Start = %v, want nil", err)
+	}
+}
+
+// A Shutdown call before Start must be a true no-op: it must not touch the
+// underlying *http.Server. If it did (by falling through to
+// s.srv.Shutdown(ctx) instead of returning early), that server is marked
+// permanently shut down, and a later Start's Serve goroutine exits and closes
+// the listener immediately -- silently killing every request on that port.
+func TestShutdownBeforeStartDoesNotPreventALaterStart(t *testing.T) {
+	t.Parallel()
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "ok")
+	})
+	s := httpserver.New(h, httpserver.Options{Addr: "127.0.0.1:0"})
+
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown before Start = %v, want nil", err)
+	}
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start after a pre-Start Shutdown: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Shutdown(context.Background()) })
+
+	if code, body := get(t, "http://"+s.Addr()); code != 200 || body != "ok" {
+		t.Errorf("GET after Start = %d %q, want 200 \"ok\"", code, body)
+	}
+}
+
+// Shutdown must release its mutex before returning, or any later call that
+// needs it (Addr, or a second Shutdown) deadlocks forever.
+func TestShutdownReleasesItsLock(t *testing.T) {
+	t.Parallel()
+	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{Addr: "127.0.0.1:0"})
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		s.Addr()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Addr() after Shutdown deadlocked; Shutdown must release its mutex")
 	}
 }

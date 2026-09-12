@@ -201,6 +201,79 @@ func TestAHungCheckTimesOutAndCountsAsFailure(t *testing.T) {
 	}
 }
 
+func TestCheckTimeoutIsTwoSeconds(t *testing.T) {
+	t.Parallel()
+	if got := httpserver.CheckTimeoutForTest(); got != 2*time.Second {
+		t.Errorf("checkTimeout = %v, want 2s", got)
+	}
+}
+
+func TestReadyFailureResponseIsJSON(t *testing.T) {
+	t.Parallel()
+	h := httpserver.NewHealth()
+	h.Ready.Set(true)
+	h.AddReadyCheck("db", func(context.Context) error { return errors.New("x") })
+
+	rec := httptest.NewRecorder()
+	h.Ready.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+}
+
+// The per-check context must be canceled as soon as the check returns, not
+// left to expire on its own at the timeout: that is what releases the
+// timer resources context.WithTimeout allocated for it.
+func TestReadyCancelsThePerCheckContextPromptly(t *testing.T) {
+	t.Parallel()
+	h := httpserver.NewHealth()
+	h.Ready.Set(true)
+	var captured context.Context
+	h.AddReadyCheck("db", func(ctx context.Context) error {
+		captured = ctx
+		return nil
+	})
+
+	probe(t, h.Ready)
+
+	if captured == nil {
+		t.Fatal("the check never ran")
+	}
+	if captured.Err() == nil {
+		t.Error("the per-check context was still live after the check returned; " +
+			"cancel() must run promptly to release its resources")
+	}
+}
+
+// writeHeaderSpy records whether WriteHeader was actually invoked, since
+// httptest.ResponseRecorder defaults Code to 200 even when nothing ever calls
+// WriteHeader -- so asserting rec.Code alone cannot tell the two apart.
+type writeHeaderSpy struct {
+	*httptest.ResponseRecorder
+	wroteHeader bool
+}
+
+func (w *writeHeaderSpy) WriteHeader(code int) {
+	w.wroteHeader = true
+	w.ResponseRecorder.WriteHeader(code)
+}
+
+func TestReadySuccessExplicitlyWritesStatusOK(t *testing.T) {
+	t.Parallel()
+	h := httpserver.NewHealth()
+	h.Ready.Set(true)
+
+	rec := &writeHeaderSpy{ResponseRecorder: httptest.NewRecorder()}
+	h.Ready.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+
+	if !rec.wroteHeader {
+		t.Error("ServeHTTP did not call WriteHeader on the success path")
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+}
+
 func TestGateIsSafeUnderConcurrentSetAndServe(t *testing.T) {
 	t.Parallel()
 	h := httpserver.NewHealth()
