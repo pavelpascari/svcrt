@@ -5,35 +5,10 @@ cd "$(dirname "$0")/.."
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# Library modules that must each stand alone with zero external dependencies.
-#
-# Derived from the go.mod files on disk rather than hand-listed: this list
-# used to be duplicated here and in release.sh, and two hand-kept copies is
-# how a module added at R1 ends up ungated with nobody noticing. Exemplars
-# live under examples/ and are deliberately excluded -- they depend on the
-# libraries and are handled separately below.
-MODULES=()
-for f in */go.mod; do
-  [ -f "$f" ] || continue
-  m=${f%/go.mod}
-  [ "$m" = "examples" ] && continue
-  MODULES+=("$m")
-done
-[ ${#MODULES[@]} -gt 0 ] || fail "no library modules found (expected */go.mod)"
-
-# Modules whose bugs are likelier to be "hangs one run in fifty" than "returns
-# the wrong value": goroutines, timers, shared state. A single green -race run
-# says very little about those -- coverage and mutation testing are both
-# blind to concurrency, so this is the one gate that catches it. Everything
-# else runs at -count=1; these run at -count=10.
-COUNT_MODULES=(lifecycle httpserver)
-
-count_for() {
-  for c in "${COUNT_MODULES[@]}"; do
-    [ "$c" = "$1" ] && { printf '10'; return; }
-  done
-  printf '1'
-}
+# MODULES, EXEMPLARS, COUNT_MODULES and count_for -- derived from disk and
+# shared with release.sh, which applies the same -count policy before it tags.
+# lib.sh also asserts every COUNT_MODULES name is a module that exists.
+. scripts/lib.sh
 
 for m in "${MODULES[@]}"; do
   echo "== $m =="
@@ -71,11 +46,17 @@ grep -q '^go 1\.22$' contract/go.mod ||
 
 # Exemplars depend on unpublished modules, so unlike the libraries they run
 # WITH the workspace -- this is the one place go.work is load-bearing.
-# Derived rather than listed, same reasoning as MODULES above: a second
-# exemplar added later must not be silently ungated.
-for f in examples/*/go.mod; do
-  [ -f "$f" ] || continue
-  e=${f%/go.mod}
+#
+# Derived in lib.sh rather than listed, same reasoning as MODULES: a second
+# exemplar added later must not be silently ungated. Guarded here: an unmatched glob would leave the loop
+# body unrun and this script would print OK having tested zero exemplars --
+# every acceptance suite silently skipped. That is not hypothetical: fold the
+# two exemplars into a single examples/go.mod (orders/ and worker/ as
+# packages) and examples/*/go.mod matches nothing, while the library loop
+# above already skips "examples" by name.
+[ ${#EXEMPLARS[@]} -gt 0 ] || fail "no exemplars found under examples/*/go.mod; the acceptance suites are not running"
+
+for e in "${EXEMPLARS[@]}"; do
   echo "== $e =="
   (cd "$e" && go vet ./...) || fail "$e: go vet"
   (cd "$e" && go test -race ./...) || fail "$e: go test"

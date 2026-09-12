@@ -97,6 +97,30 @@ MUTATION_FLOORS=(
   "logging=0.80"
 )
 
+# Both lists above are keyed by module path and hand-kept, so both can go
+# stale the moment a module is renamed or split -- and they fail in opposite,
+# equally quiet directions. A stale MUTATION_EXCLUDE key fails OPEN: nothing
+# matches, so nothing is excluded and the entry is simply dead text that
+# still reads like policy. A stale MUTATION_FLOORS key fails the other way:
+# the module silently reverts to MUTATION_FLOOR_DEFAULT, so a floor lowered
+# for a documented reason is quietly raised, or one raised on purpose is
+# quietly lowered. ci.sh checks COUNT_MODULES against disk for exactly this
+# reason; do the same here rather than letting a rename rot a gate.
+check_keys() {
+  local label=$1 entry key m found
+  shift
+  for entry in "$@"; do
+    key=${entry%%=*}
+    found=false
+    for m in "${ALL_MODULES[@]}"; do
+      if [ "$m" = "$key" ]; then found=true; fi
+    done
+    $found || fail "$label names '$key', which is not a module on disk. That entry is doing nothing. Fix the name or drop it."
+  done
+}
+[ ${#MUTATION_EXCLUDE[@]} -eq 0 ] || check_keys MUTATION_EXCLUDE "${MUTATION_EXCLUDE[@]}"
+[ ${#MUTATION_FLOORS[@]} -eq 0 ] || check_keys MUTATION_FLOORS "${MUTATION_FLOORS[@]}"
+
 # env_name turns a module path into the suffix of its MUTATION_MIN_ variable:
 # examples/orders -> EXAMPLES_ORDERS.
 env_name() { printf '%s' "$1" | tr 'a-z' 'A-Z' | tr -c 'A-Z0-9' '_'; }

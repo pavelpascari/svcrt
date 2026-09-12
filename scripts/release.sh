@@ -7,17 +7,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# Derived from the go.mod files on disk, not hand-listed. This list and
-# ci.sh's used to be two hand-kept copies of the same thing, which is how a
-# module added later ends up ungated -- or, here, untaggable -- with nobody
-# noticing. Exemplars under examples/ are excluded: they are not released.
-MODULES=()
-for f in */go.mod; do
-  [ -f "$f" ] || continue
-  m=${f%/go.mod}
-  [ "$m" = "examples" ] && continue
-  MODULES+=("$m")
-done
+# MODULES, COUNT_MODULES and count_for, derived from disk and shared with
+# ci.sh. This list and ci.sh's used to be two hand-kept copies of the same
+# thing, which is how a module added later ends up ungated -- or, here,
+# untaggable -- with nobody noticing.
+. scripts/lib.sh
 
 usage() {
   echo "usage: $0 <module> <version>" >&2
@@ -54,9 +48,13 @@ fi
 
 # Verify the module stands alone at exactly the state being tagged. GOWORK=off
 # because consumers will not have our workspace.
+# -count comes from the same policy ci.sh uses: a module whose bugs are
+# "hangs one run in fifty" gets ten runs. Tagging is the point after which a
+# version is permanent, so this is the last place that policy can still be
+# applied -- it must not be weaker here than in CI.
 echo "verifying $module in isolation..."
 (cd "$module" && GOWORK=off go vet ./...)
-(cd "$module" && GOWORK=off go test -race ./...)
+(cd "$module" && GOWORK=off go test -race -count=$(count_for "$module") ./...)
 # Assigned inside `if !` so a go list failure reports here rather than
 # aborting through errexit with no explanation of which check failed.
 if ! n=$(cd "$module" && GOWORK=off go list -m all | wc -l | tr -d ' '); then
