@@ -110,19 +110,23 @@ check_keys() {
 # filenames, and a filename that matches nothing excludes nothing while still
 # reading like a considered policy decision. Rename or delete an exemplar's
 # main.go and the entry becomes a comment with a syntax.
+# Validated against the WORKTREE, not the repo, for the same reason targets are
+# globbed there: the worktree at HEAD is what actually gets mutated, so it is
+# what an exclusion has to match. A main.go that exists only as an uncommitted
+# file in the repo would otherwise validate an entry that excludes nothing.
 check_excluded_files() {
-  local entry m f
+  local root=$1 entry m f
+  shift
   for entry in "$@"; do
     m=${entry%%=*}
     for f in ${entry#*=}; do
-      [ -f "$m/$f" ] || fail "MUTATION_EXCLUDE says '$m=$f', but $m/$f does not exist. That exclusion is doing nothing. Fix the name or drop it."
+      [ -f "$root/$m/$f" ] || fail "MUTATION_EXCLUDE says '$m=$f', but $m/$f does not exist at HEAD. That exclusion is doing nothing. Fix the name or drop it."
     done
   done
 }
 
 if [ ${#MUTATION_EXCLUDE[@]} -gt 0 ]; then
   check_keys MUTATION_EXCLUDE "${MUTATION_EXCLUDE[@]}"
-  check_excluded_files "${MUTATION_EXCLUDE[@]}"
 fi
 [ ${#MUTATION_FLOORS[@]} -eq 0 ] || check_keys MUTATION_FLOORS "${MUTATION_FLOORS[@]}"
 
@@ -205,6 +209,22 @@ targets_for() {
 # exemplar cannot find its siblings. Proving each module builds standalone is
 # ci.sh's job and it still does it; mutation testing only needs the module to
 # build, so it uses the workspace and keeps the committed go.mod honest.
+# module_fingerprint prints a content hash of the repo's copy of a module, used
+# to prove a run did not touch it. It covers tracked content (via the diff
+# against HEAD, which changes if a tracked file is rewritten) and the names and
+# contents of untracked .go files, which a mutation run could also clobber.
+module_fingerprint() {
+  local m=$1
+  {
+    git -C "$REPO" diff HEAD -- "$m"
+    git -C "$REPO" ls-files --others --exclude-standard -- "$m" | sort |
+      while IFS= read -r f; do
+        printf '%s ' "$f"
+        cat "$REPO/$f" 2>/dev/null || true
+      done
+  } | shasum | cut -d' ' -f1
+}
+
 WORKTREE=""
 cleanup_worktree() {
   [ -n "$WORKTREE" ] || return 0
@@ -212,9 +232,17 @@ cleanup_worktree() {
   git -C "$REPO" worktree prune >/dev/null 2>&1 || true
   WORKTREE=""
 }
-# EXIT alone is not enough: the harness this is developed under kills a long run
-# with SIGTERM, and `set -e` aborts through a failed step. Trap the signals too
-# so a killed run still takes its worktree with it.
+# EXIT covers the ordinary ends, including `set -e` aborting through a failed
+# step and `fail` exiting. INT and TERM are trapped because this script gets
+# killed by timeouts and by Ctrl-C.
+#
+# One honest caveat: bash defers a trap until the running foreground command
+# returns, so a TERM aimed at this script's pid alone does not clean up until
+# the in-flight go-mutesting finishes -- which for a large module is minutes. A
+# signal to the process GROUP (what a terminal Ctrl-C and most harness timeouts
+# actually send) reaches go-mutesting too, and cleanup is then prompt. The repo
+# is safe either way, since nothing in it is ever mutated; the worst case is an
+# orphaned worktree, which `git worktree prune` clears.
 trap cleanup_worktree EXIT INT TERM
 
 make_worktree() {
@@ -240,20 +268,30 @@ fi
 # a warning and not a failure: "score my committed state" is a legitimate thing
 # to ask for with a dirty tree, and the old in-place behaviour made it
 # impossible.
-if ! git -C "$REPO" diff --quiet HEAD 2>/dev/null; then
+#
+# Untracked files count. A brand-new .go file is the likeliest thing to be
+# missing from a run and the easiest to overlook, since `git diff` says nothing
+# about it -- so list those too rather than warn about half the problem.
+DIRTY=$(git -C "$REPO" status --porcelain -- . | sed 's/^...//')
+if [ -n "$DIRTY" ]; then
   echo "WARNING: the working tree has uncommitted changes. Mutation runs against"
   echo "         HEAD ($(git -C "$REPO" rev-parse --short HEAD)) in an isolated worktree, so those"
   echo "         changes are NOT being mutated. Commit them to include them:"
-  git -C "$REPO" diff --name-only HEAD | sed 's/^/           /'
+  printf '%s\n' "$DIRTY" | sed 's/^/           /'
   echo
 fi
 
 WORKTREE=$(make_worktree)
 
+if [ ${#MUTATION_EXCLUDE[@]} -gt 0 ]; then
+  check_excluded_files "$WORKTREE" "${MUTATION_EXCLUDE[@]}"
+fi
+
 for m in "${MODULES[@]}"; do
   echo "== $m =="
 
   targets=$(targets_for "$m" "$WORKTREE")
+  before=$(module_fingerprint "$m")
 
   set +e
   out=$(cd "$WORKTREE/$m" && "$GO_MUTESTING" $targets 2>&1)
@@ -262,12 +300,16 @@ for m in "${MODULES[@]}"; do
   [ "$rc" -eq 0 ] || fail "$m: go-mutesting failed to run:
 $out"
 
-  # Isolation regression check. The run above mutates files inside $WORKTREE, so
-  # the repo copy of $m must be byte-identical to HEAD afterwards. If this ever
-  # fires, something has reintroduced an in-repo run and the guarantee above is
-  # gone -- fix that rather than deleting this.
-  if ! git -C "$REPO" diff --exit-code HEAD -- "$m" > /dev/null; then
-    fail "$m: the repo working tree changed during a mutation run that should have been confined to $WORKTREE. Restore with: git checkout -- $m"
+  # Isolation regression check: the repo copy of $m must be unchanged BY THIS RUN.
+  #
+  # Compare a before/after fingerprint, not the tree against HEAD. Comparing to
+  # HEAD conflates "this run corrupted the repo" with "the tree was already
+  # dirty when you started", which is a state this script explicitly supports --
+  # it warns about it a few lines up and carries on. Getting that wrong is not a
+  # cosmetic mislabel: the failure told the user to run `git checkout -- $m`,
+  # which would have destroyed the uncommitted work that triggered it.
+  if [ "$(module_fingerprint "$m")" != "$before" ]; then
+    fail "$m: the repo copy of $m changed during a run that should have been confined to $WORKTREE. Something has reintroduced an in-repo mutation run; fix that rather than deleting this check. Your working tree has NOT been restored -- inspect it with: git diff -- $m"
   fi
 
   line=$(echo "$out" | grep "The mutation score is" || true)
