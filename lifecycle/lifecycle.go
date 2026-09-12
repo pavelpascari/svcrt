@@ -126,8 +126,12 @@ func (l *Lifecycle) Run(ctx context.Context) error {
 
 	for _, level := range lv {
 		if err := l.startLevel(ctx, level, started); err != nil {
-			l.stopStarted(ctx, lv, started)
-			return err
+			// A component whose Start already succeeded may still fail to
+			// Stop during the unwind. That failure is just as much a part
+			// of "join every error" as the Start failures are, so it must
+			// not be dropped on the floor here.
+			stopErr := l.stopStarted(ctx, lv, started)
+			return errors.Join(err, stopErr)
 		}
 	}
 
