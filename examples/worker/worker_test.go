@@ -284,3 +284,34 @@ func TestConsumerStopRespectsContextDeadline(t *testing.T) {
 		t.Error("Stop with an already-cancelled context = nil, want an error")
 	}
 }
+
+// TestWorkerADeadListenerTriggersAnOrderedShutdown covers the one wiring in
+// buildWorkerStack that nothing else reaches: `OnServeError: lc.Fatal`. The
+// admin server is this worker's only socket, so if it dies unnoticed the
+// process keeps consuming with no probe answering at all -- the orchestrator
+// then kills it mid-work instead of draining it. Killing the listener out
+// from under Serve is the production failure that field exists for; deleting
+// the field must fail here.
+func TestWorkerADeadListenerTriggersAnOrderedShutdown(t *testing.T) {
+	s := newStack(t, 0)
+	done := make(chan error, 1)
+	go func() { done <- s.lc.Run(context.Background()) }()
+	time.Sleep(100 * time.Millisecond)
+
+	if err := s.admin.CloseListener(); err != nil {
+		t.Fatalf("CloseListener: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("Run = nil; a dead listener did not reach lifecycle.Fatal -- check OnServeError in buildWorkerStack")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a dead listener never woke Run -- check OnServeError in buildWorkerStack")
+	}
+
+	if ops := s.snapshot(); !slices.Contains(ops, "stop:queue") {
+		t.Errorf("ops = %v, want an ordered shutdown after the listener died", ops)
+	}
+}

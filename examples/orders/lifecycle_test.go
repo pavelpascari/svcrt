@@ -244,3 +244,50 @@ func TestBuildStackDefaultsTraceToANoop(t *testing.T) {
 		t.Fatal("Run did not return")
 	}
 }
+
+// TestAcceptanceADeadListenerTriggersAnOrderedShutdown is the test
+// TestAcceptanceFatalTriggersTheSameDrain only looks like: that one calls
+// lc.Fatal directly, so the server->lifecycle edge -- `OnServeError:
+// lc.Fatal` in buildStack -- is never exercised and deleting it leaves the
+// suite green. This kills the listener out from under Serve instead, which
+// is the production failure (fd exhaustion, an accept storm) that field
+// exists for. Without it the process stays up with every probe answering
+// 200 and nothing serving, which is precisely the outage lifecycle.Fatal was
+// designed to prevent.
+//
+// Both servers are covered: each one's OnServeError is a separate line that
+// can be dropped on its own.
+func TestAcceptanceADeadListenerTriggersAnOrderedShutdown(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kill func(*stack) *httpserver.Server
+	}{
+		{"api", func(s *stack) *httpserver.Server { return s.api }},
+		{"admin", func(s *stack) *httpserver.Server { return s.admin }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newStack(t, 0)
+			done := make(chan error, 1)
+			go func() { done <- s.lc.Run(context.Background()) }()
+			time.Sleep(100 * time.Millisecond)
+
+			close(s.slowGate)
+			if err := tc.kill(s).CloseListener(); err != nil {
+				t.Fatalf("CloseListener: %v", err)
+			}
+
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Error("Run = nil; a dead listener did not reach lifecycle.Fatal -- check OnServeError in buildStack")
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("a dead listener never woke Run -- check OnServeError in buildStack")
+			}
+
+			if ops := s.snapshot(); !slices.Contains(ops, "stop:store") {
+				t.Errorf("ops = %v, want an ordered shutdown after the listener died", ops)
+			}
+		})
+	}
+}
