@@ -7,4 +7,5 @@ use (
 	./lifecycle
 	./httpserver
 	./examples/orders
+	./examples/worker
 )
