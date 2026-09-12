@@ -52,10 +52,24 @@ done
 # what exists on disk, and a new exemplar's main.go should get its own
 # considered entry rather than being swept in implicitly. A new exemplar
 # under examples/ needs one added here.
+#
+# The scope of an entry is deliberately narrow: main() itself -- config load,
+# logger, SignalContext, Run, os.Exit -- is untestable, because go test never
+# calls main. The WIRING main() calls is not, and must not be excluded. That
+# distinction was lost once already: buildStack was extracted from main.go
+# specifically so the mutation gate would cover it, and then left in main.go,
+# the one file the gate refuses to look at -- so the function whose whole
+# purpose was to be gated was the only one outside the gate. A real survivor
+# (a dropped `OnServeError: lc.Fatal`, which is the entire mechanism turning
+# a dead listener into an ordered shutdown) sat there undetected until a
+# review found it by hand. The wiring now lives in each exemplar's stack.go
+# and is mutated like everything else. If you find yourself adding a file
+# here, or moving code into main.go to quiet a survivor, that is the bug.
 MUTATION_EXCLUDE=(
-  # main.go binds a real port, installs no seam, and is untestable by design
-  # -- that is the point of the exemplar's "you write main()" claim. Its ~15
-  # survivors measure that decision, not the test suite.
+  # main.go holds func main() and nothing else: it loads config, builds a
+  # logger, installs a real OS signal handler, calls Run, and exits. No test
+  # binary can reach any of it. Its survivors measure that fact, not the test
+  # suite. Everything these mains wire up lives in stack.go and is mutated.
   "examples/orders=main.go"
   "examples/worker=main.go"
 )
