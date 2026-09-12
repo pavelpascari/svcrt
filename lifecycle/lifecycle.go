@@ -107,8 +107,6 @@ func (l *Lifecycle) Add(name string, start StartFunc, stop StopFunc, opts ...Opt
 // OnDrain registers a hook run once, before any component is stopped.
 func (l *Lifecycle) OnDrain(f func()) { l.drainHooks = append(l.drainHooks, f) }
 
-func (l *Lifecycle) log() *slog.Logger { return l.cfg.Logger }
-
 func (l *Lifecycle) logf(level slog.Level, msg string, args ...any) {
 	if l.cfg.Logger != nil {
 		l.cfg.Logger.Log(context.Background(), level, msg, args...)
@@ -172,8 +170,21 @@ func (l *Lifecycle) startLevel(ctx context.Context, level []int, started []bool)
 	return errors.Join(errs...)
 }
 
-// drain runs the OnDrain hooks and waits DrainDelay.
+// drain runs the OnDrain hooks and waits DrainDelay before anything stops.
+//
+// The order matters and is the reason DrainDelay exists: readiness goes false,
+// THEN the delay lets a load balancer notice, THEN the server stops accepting.
+// Flipping readiness inside Stop instead would put the delay on the wrong side
+// and drop exactly the traffic this protects.
 func (l *Lifecycle) drain() {
+	// A forgettable line whose absence silently disables graceful drain is a
+	// smell, so say something. Not an error: a CLI, a one-shot job, or a
+	// worker with no readiness concept legitimately registers no hook.
+	if len(l.drainHooks) == 0 && len(l.comps) > 0 {
+		l.logf(slog.LevelWarn,
+			"draining with no OnDrain hook registered; readiness will not flip before components stop")
+	}
+
 	for _, h := range l.drainHooks {
 		h()
 	}
