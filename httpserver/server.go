@@ -21,6 +21,14 @@ import (
 // indefinitely.
 const defaultReadHeaderTimeout = 10 * time.Second
 
+// errAlreadyShutDown is returned by Start once a prior Shutdown has actually
+// stopped a running server. Its text says what to do, not just what
+// happened: there is no way to make this Server serve again, so the fix is
+// always "construct a new one," never "call Start again."
+var errAlreadyShutDown = errors.New(
+	"httpserver: Server already shut down; construct a new Server instead of calling Start again",
+)
+
 // Options mirrors the knobs of http.Server field for field, so a reader who
 // knows one knows the other.
 type Options struct {
@@ -38,13 +46,22 @@ type Options struct {
 }
 
 // Server wraps an http.Server with a lifecycle-shaped Start and Shutdown.
+//
+// A Server is single-use: one Start/Shutdown pair, never reused. Go's
+// http.Server cannot be restarted once Shutdown has stopped it -- a later
+// Serve on it returns http.ErrServerClosed immediately, closing whatever
+// listener it was given without ever accepting a connection -- so a Server
+// wrapping it can't be restarted either. Calling Start again after such a
+// Shutdown returns an error rather than binding a listener that will never
+// serve anything; construct a new Server instead.
 type Server struct {
 	srv  *http.Server
 	opts Options
 
-	mu   sync.Mutex
-	ln   net.Listener
-	addr string
+	mu       sync.Mutex
+	ln       net.Listener
+	addr     string
+	shutDown bool // set once Shutdown has actually stopped a started server
 }
 
 // New returns a Server that will serve h.
@@ -77,9 +94,25 @@ func New(h http.Handler, opts Options) *Server {
 // cancellation that arrives during the bind itself is not aborted: the bind
 // window is tiny, and a lifecycle's unwind stops anything that did bind, so
 // the cost of that residual is a little wasted work, not a leaked listener.
+//
+// Start returns an error, and binds nothing, if a prior Shutdown already
+// stopped this Server: see the Server doc for why reuse is refused rather
+// than attempted. Without this check, the underlying http.Server's Serve
+// would return http.ErrServerClosed the instant it ran, which the serving
+// goroutine treats as the ordinary result of a graceful Shutdown and
+// swallows without calling OnServeError -- so Start would report success,
+// Addr would report a real address, and every request to it would be
+// connection-refused, silently.
 func (s *Server) Start(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+
+	s.mu.Lock()
+	shutDown := s.shutDown
+	s.mu.Unlock()
+	if shutDown {
+		return errAlreadyShutDown
 	}
 
 	var lc net.ListenConfig
@@ -106,10 +139,16 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 // Shutdown stops accepting and waits for in-flight requests, bounded by ctx.
-// It is a no-op if Start was never called.
+// It is a no-op if Start was never called -- but if Start did run, this
+// permanently seals the Server: the underlying http.Server cannot be
+// restarted, so this Server cannot be either. A later Start returns
+// errAlreadyShutDown instead of silently reusing it.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	started := s.ln != nil
+	if started {
+		s.shutDown = true
+	}
 	s.mu.Unlock()
 	if !started {
 		return nil

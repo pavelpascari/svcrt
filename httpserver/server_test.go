@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -243,6 +244,32 @@ func TestShutdownBeforeStartDoesNotPreventALaterStart(t *testing.T) {
 
 	if code, body := get(t, "http://"+s.Addr()); code != 200 || body != "ok" {
 		t.Errorf("GET after Start = %d %q, want 200 \"ok\"", code, body)
+	}
+}
+
+// Once Shutdown has actually stopped a running Server, a later Start must
+// refuse rather than silently succeed: the underlying http.Server is sealed
+// permanently by Go itself, so a second Serve on it returns
+// http.ErrServerClosed immediately -- swallowed by Start's goroutine as the
+// normal graceful case -- and the caller would be left with a "successful"
+// Start, a real-looking Addr, and a listener that refuses every connection.
+func TestStartAfterAShutdownThatStoppedAServerReturnsAnError(t *testing.T) {
+	t.Parallel()
+	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{Addr: "127.0.0.1:0"})
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	err := s.Start(context.Background())
+	if err == nil {
+		_ = s.Shutdown(context.Background())
+		t.Fatal("Start after a real Shutdown succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "already shut down") {
+		t.Errorf("error = %q, want it to name the situation (\"already shut down\")", err.Error())
 	}
 }
 
