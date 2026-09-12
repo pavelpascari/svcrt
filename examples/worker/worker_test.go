@@ -145,7 +145,12 @@ func TestWorkerDrainFlipsReadiness(t *testing.T) {
 	cancel()
 
 	time.Sleep(100 * time.Millisecond)
-	if code := status(t, base+"/readyz"); code != 503 {
+	switch code := status(t, base+"/readyz"); code {
+	case 503:
+		// want
+	case 0:
+		t.Errorf("readiness during drain: could not reach %s at all -- the admin server has already stopped, not just gone unready. That means the drain delay isn't being honored (e.g. DrainDelay wired to zero), not a network flake.", base+"/readyz")
+	default:
 		t.Errorf("readiness during drain = %d, want 503", code)
 	}
 	if code := status(t, base+"/healthz"); code != 200 {

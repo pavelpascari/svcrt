@@ -21,13 +21,27 @@ for f in */go.mod; do
 done
 [ ${#MODULES[@]} -gt 0 ] || fail "no library modules found (expected */go.mod)"
 
+# Modules whose bugs are likelier to be "hangs one run in fifty" than "returns
+# the wrong value": goroutines, timers, shared state. A single green -race run
+# says very little about those -- coverage and mutation testing are both
+# blind to concurrency, so this is the one gate that catches it. Everything
+# else runs at -count=1; these run at -count=10.
+COUNT_MODULES=(lifecycle httpserver)
+
+count_for() {
+  for c in "${COUNT_MODULES[@]}"; do
+    [ "$c" = "$1" ] && { printf '10'; return; }
+  done
+  printf '1'
+}
+
 for m in "${MODULES[@]}"; do
   echo "== $m =="
 
   # Spec P2: useful with no other svcrt module present. GOWORK=off is the
   # point -- go.work masks version skew locally, so CI must run without it.
   (cd "$m" && GOWORK=off go vet ./...) || fail "$m: go vet"
-  (cd "$m" && GOWORK=off go test -race ./...) || fail "$m: go test"
+  (cd "$m" && GOWORK=off go test -race -count=$(count_for "$m") ./...) || fail "$m: go test"
 
   # Spec §8.2: zero requires. Exactly one line -- the module itself.
   # Assigned inside `if !` so a go list failure reports through fail() with
@@ -55,10 +69,16 @@ done
 grep -q '^go 1\.22$' contract/go.mod ||
   fail "contract/go.mod no longer declares 'go 1.22'; that floor is a deliberate compatibility commitment for the one module that freezes (spec §4). If raising it is intended, change it here too."
 
-# The example depends on three unpublished modules, so unlike the libraries it
-# runs WITH the workspace. This is the one place go.work is load-bearing.
-echo "== examples/orders =="
-(cd examples/orders && go vet ./...) || fail "examples/orders: go vet"
-(cd examples/orders && go test -race ./...) || fail "examples/orders: go test"
+# Exemplars depend on unpublished modules, so unlike the libraries they run
+# WITH the workspace -- this is the one place go.work is load-bearing.
+# Derived rather than listed, same reasoning as MODULES above: a second
+# exemplar added later must not be silently ungated.
+for f in examples/*/go.mod; do
+  [ -f "$f" ] || continue
+  e=${f%/go.mod}
+  echo "== $e =="
+  (cd "$e" && go vet ./...) || fail "$e: go vet"
+  (cd "$e" && go test -race ./...) || fail "$e: go test"
+done
 
 echo "OK"

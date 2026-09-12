@@ -34,14 +34,30 @@ done
 # the run happens in a synthesized copy outside the repo with the replaces
 # injected. A side benefit: go-mutesting rewrites sources in place, so a
 # module run this way cannot leave the working tree corrupted at all.
-WORKSPACE_MODULES=(examples/orders)
+#
+# Every exemplar under examples/ depends on unpublished sibling modules this
+# way, so this is derived the same way ALL_MODULES' exemplar half is, rather
+# than hand-listed: a third exemplar added later must not silently run
+# unmutated (or, worse, run directly against the repo and get corrupted).
+WORKSPACE_MODULES=()
+for f in examples/*/go.mod; do
+  [ -f "$f" ] || continue
+  WORKSPACE_MODULES+=("${f%/go.mod}")
+done
 
 # Files excluded from a module's mutation run, as "<module>=<file> <file>...".
+#
+# Unlike the lists above, this one is deliberately hand-kept: it is a policy
+# statement about which files are untestable by design, not an inventory of
+# what exists on disk, and a new exemplar's main.go should get its own
+# considered entry rather than being swept in implicitly. A new exemplar
+# under examples/ needs one added here.
 MUTATION_EXCLUDE=(
   # main.go binds a real port, installs no seam, and is untestable by design
   # -- that is the point of the exemplar's "you write main()" claim. Its ~15
   # survivors measure that decision, not the test suite.
   "examples/orders=main.go"
+  "examples/worker=main.go"
 )
 
 # --- per-module floor --------------------------------------------------------
