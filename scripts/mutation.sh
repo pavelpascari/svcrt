@@ -118,7 +118,24 @@ check_keys() {
     $found || fail "$label names '$key', which is not a module on disk. That entry is doing nothing. Fix the name or drop it."
   done
 }
-[ ${#MUTATION_EXCLUDE[@]} -eq 0 ] || check_keys MUTATION_EXCLUDE "${MUTATION_EXCLUDE[@]}"
+# The same argument one level down, for MUTATION_EXCLUDE only: its values are
+# filenames, and a filename that matches nothing excludes nothing while still
+# reading like a considered policy decision. Rename or delete an exemplar's
+# main.go and the entry becomes a comment with a syntax.
+check_excluded_files() {
+  local entry m f
+  for entry in "$@"; do
+    m=${entry%%=*}
+    for f in ${entry#*=}; do
+      [ -f "$m/$f" ] || fail "MUTATION_EXCLUDE says '$m=$f', but $m/$f does not exist. That exclusion is doing nothing. Fix the name or drop it."
+    done
+  done
+}
+
+if [ ${#MUTATION_EXCLUDE[@]} -gt 0 ]; then
+  check_keys MUTATION_EXCLUDE "${MUTATION_EXCLUDE[@]}"
+  check_excluded_files "${MUTATION_EXCLUDE[@]}"
+fi
 [ ${#MUTATION_FLOORS[@]} -eq 0 ] || check_keys MUTATION_FLOORS "${MUTATION_FLOORS[@]}"
 
 # env_name turns a module path into the suffix of its MUTATION_MIN_ variable:
