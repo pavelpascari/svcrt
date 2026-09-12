@@ -384,7 +384,11 @@ worker with no application HTTP surface has only this one.
 
 ```go
 func AdminMux(h *Health) *http.ServeMux   // three probes, paths below
-func PprofHandler() http.Handler          // explicit, opt-in, touches no global
+```
+
+```go
+package httpserver/pprof                  // SEPARATE package — see below
+func Handler() http.Handler
 ```
 
 `AdminMux` mounts exactly three routes, and they are named here rather than left
@@ -397,7 +401,7 @@ Kubernetes:
 | `GET /readyz`   | `Ready` |
 | `GET /startupz` | `Started` |
 
-`PprofHandler` returns a single `http.Handler` that routes the whole
+`pprof.Handler()` returns a single `http.Handler` routing the whole
 `/debug/pprof/` subtree internally, so it is mounted once at that prefix — Go's
 `net/http/pprof` exposes five separate handlers, and requiring a caller to mount
 each is how one gets forgotten.
@@ -407,7 +411,7 @@ from us:
 
 ```go
 admin := httpserver.AdminMux(h)
-admin.Handle("GET /debug/pprof/", httpserver.PprofHandler())
+admin.Handle("/debug/pprof/", pprof.Handler())   // svcrt/httpserver/pprof
 // R3 mounts telemetry's metrics handler here
 ```
 
@@ -415,17 +419,36 @@ Returning a mux you extend keeps parent §9's "nothing served at a fixed path by
 default" true — you opt in by calling `AdminMux`, and the gates remain mountable
 individually anywhere.
 
-**`PprofHandler` exists because the idiomatic Go incantation breaks two of this
-project's own rules.** `import _ "net/http/pprof"` works through an `init()`
-that registers handlers on `http.DefaultServeMux`. P3 bans `init()` side
-effects and `svclint`'s `defaults` pass bans `http.DefaultServeMux`, so the
-standard approach would trip the project's own linter — and worse, it silently
-exposes heap dumps and goroutine traces on whatever else happens to serve
-`DefaultServeMux`.
+**pprof lives in its own package, and the reason is a stdlib side effect that
+cannot be avoided.**
 
-`PprofHandler` mounts `pprof.Index`, `Cmdline`, `Profile`, `Symbol`, and `Trace`
-explicitly on a mux the caller owns. It is never mounted by default: profiling
-endpoints are a genuine information disclosure if that port is ever routable.
+`net/http/pprof` has an `init()` that registers its handlers on
+`http.DefaultServeMux`. **This fires on any import, not only a blank one** —
+verified empirically: a non-blank `import "net/http/pprof"` leaves
+`DefaultServeMux` answering `GET /debug/pprof/` with 200. An earlier draft of
+this spec claimed a `PprofHandler` in `httpserver` would "touch no global";
+that claim was false.
+
+The consequence matters more for a library than an application. If `httpserver`
+imported `net/http/pprof`, then **every consumer of `httpserver` would silently
+acquire pprof endpoints on their `DefaultServeMux`** — including one whose
+legacy code actually serves it. That is an information disclosure introduced by
+a dependency the user never asked for.
+
+So `Handler()` lives in **`svcrt/httpserver/pprof`**, a separate package in the
+same module. Importing `httpserver` pulls nothing; a user who wants profiling
+imports the subpackage explicitly and thereby opts into the same side effect
+they would get importing `net/http/pprof` themselves.
+
+Its doc comment states the side effect plainly: importing this package
+registers pprof handlers on `http.DefaultServeMux`, which is inert unless
+something serves that mux — and `svclint`'s `defaults` pass already bans
+serving it.
+
+`Handler()` returns a mux routing the whole `/debug/pprof/` subtree, so it is
+mounted once at that prefix rather than five times. It is never mounted by
+default: profiling endpoints are a genuine information disclosure if that port
+is ever routable.
 
 ### 4.4 `ReadHeaderTimeout` is never zero
 
@@ -569,6 +592,7 @@ Recorded so they are decisions rather than drift.
 | 4 | §12 R1 | Adds `examples/worker` | §5 — proves the boundaries hold for a non-service process |
 | 5 | R0 testing gates | Adds `-race -count=10` and test timeouts | §7 — R0's gates are blind to concurrency |
 | 6 | — | `Run` warns when components exist but no `OnDrain` hook does | §3.5 — omitting the drain hook silently disables graceful drain |
+| 7 | — | pprof ships as `httpserver/pprof`, a separate package | §4.3 — importing `net/http/pprof` pollutes `DefaultServeMux` for every consumer |
 
 ---
 
