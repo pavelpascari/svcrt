@@ -3,6 +3,7 @@ package httpserver_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -71,13 +72,21 @@ func TestChainDoesNotMutateItsInput(t *testing.T) {
 	t.Parallel()
 	var log []string
 	ms := []httpserver.Middleware{tag(&log, "a"), tag(&log, "b")}
-	before := slices.Clone(ms)
+
+	// Func values aren't comparable with ==, so identity is captured via the
+	// closure's underlying pointer. This catches Chain replacing an element
+	// with a different (even non-nil) middleware, which a nilness-only
+	// comparison cannot.
+	before := make([]uintptr, len(ms))
+	for i, m := range ms {
+		before[i] = reflect.ValueOf(m).Pointer()
+	}
 
 	_ = httpserver.Chain(ms...)
 
-	for i := range ms {
-		if &ms[i] == nil || (ms[i] == nil) != (before[i] == nil) {
-			t.Fatal("Chain modified the slice it was given")
+	for i, m := range ms {
+		if got := reflect.ValueOf(m).Pointer(); got != before[i] {
+			t.Fatalf("Chain modified element %d of the slice it was given", i)
 		}
 	}
 }
