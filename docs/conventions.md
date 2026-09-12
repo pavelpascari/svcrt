@@ -149,6 +149,20 @@ have caught it; a single green run says almost nothing about a module whose
 bugs are "hangs one run in fifty," not "returns the wrong value." `lifecycle`
 and `httpserver` run this way; the other library modules stay at `-count=1`.
 
+The list lives in `scripts/lib.sh` (`COUNT_MODULES`) and is **asserted against
+the modules on disk**. It has to be hand-kept -- it is a judgement about which
+modules are concurrent, not an inventory -- and a hand-kept list of module
+names is exactly the failure mode the derived `MODULES` list exists to avoid:
+a rename or a typo leaves the entry matching nothing, the module silently
+drops to `-count=1`, and CI still prints OK while this section still claims
+the gate applies. A gate that can quietly stop applying is worse than no gate,
+because the documentation keeps vouching for it.
+
+`scripts/release.sh` applies the same policy, not a weaker one. Tagging is the
+point after which a version is permanent, so it is the last place the policy
+can still be enforced; both scripts source the one definition rather than
+keeping a copy each.
+
 ## 6. Probe paths are fixed
 
 `/healthz` is liveness, `/readyz` is readiness, `/startupz` is startup. These
