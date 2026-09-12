@@ -212,7 +212,10 @@ targets_for() {
 # module_fingerprint prints a content hash of the repo's copy of a module, used
 # to prove a run did not touch it. It covers tracked content (via the diff
 # against HEAD, which changes if a tracked file is rewritten) and the names and
-# contents of untracked .go files, which a mutation run could also clobber.
+# contents of every untracked file in the module -- not just .go, which is
+# broader than strictly needed and deliberately so: the cost of over-including
+# is a false alarm nobody has ever seen, and the cost of under-including is a
+# silent miss.
 module_fingerprint() {
   local m=$1
   {
@@ -308,6 +311,16 @@ $out"
   # it warns about it a few lines up and carries on. Getting that wrong is not a
   # cosmetic mislabel: the failure told the user to run `git checkout -- $m`,
   # which would have destroyed the uncommitted work that triggered it.
+  #
+  # Be clear about what this does NOT prove. go-mutesting restores every file
+  # byte-identically when it completes cleanly, so an isolation regression that
+  # ran to completion leaves no trace here -- this check firing means isolation
+  # broke, but staying silent does not mean it held. The case it actually adds
+  # cover for is narrow, since an interrupted run is already caught by the rc
+  # check above. The real guarantee is structural: the run happens in $WORKTREE,
+  # so there is nothing in the repo for it to damage. This is a tripwire behind
+  # that guarantee, not the guarantee itself -- if you are relying on it to tell
+  # you isolation is intact, read the run directory instead.
   if [ "$(module_fingerprint "$m")" != "$before" ]; then
     fail "$m: the repo copy of $m changed during a run that should have been confined to $WORKTREE. Something has reintroduced an in-repo mutation run; fix that rather than deleting this check. Your working tree has NOT been restored -- inspect it with: git diff -- $m"
   fi
