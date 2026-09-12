@@ -330,3 +330,50 @@ func TestCloseListenerReportsCloseFailure(t *testing.T) {
 		t.Error("second CloseListener = nil; the error from Close is being swallowed")
 	}
 }
+
+// markerHandler is a comparable http.Handler, so the Handler wiring can be
+// asserted by identity. http.HandlerFunc is not comparable and panics on ==.
+type markerHandler struct{ id int }
+
+func (markerHandler) ServeHTTP(http.ResponseWriter, *http.Request) {}
+
+// TestOptionsLandOnTheHTTPServerFieldForField covers the six copies New makes
+// from Options into http.Server. Only ReadHeaderTimeout had tests; deleting
+// any of the other four left the whole suite green, and go-mutesting does not
+// mutate struct-literal field assignments, so the mutation gate is blind to
+// them too. A silently dropped WriteTimeout is the hazard the package doc
+// opens with: a slow client pinning a response goroutine indefinitely.
+//
+// Every value is distinct on purpose. Identical values still pass when two
+// fields are swapped, so distinctness is what catches a swap rather than
+// only a drop.
+func TestOptionsLandOnTheHTTPServerFieldForField(t *testing.T) {
+	t.Parallel()
+
+	h := markerHandler{7}
+	srv := httpserver.New(h, httpserver.Options{
+		Addr:              "127.0.0.1:0",
+		ReadHeaderTimeout: 1 * time.Second,
+		ReadTimeout:       2 * time.Second,
+		WriteTimeout:      3 * time.Second,
+		IdleTimeout:       4 * time.Second,
+		MaxHeaderBytes:    5000,
+	}).HTTPServerForTest()
+
+	for _, tc := range []struct {
+		field string
+		got   any
+		want  any
+	}{
+		{"Handler", srv.Handler, http.Handler(h)},
+		{"ReadHeaderTimeout", srv.ReadHeaderTimeout, 1 * time.Second},
+		{"ReadTimeout", srv.ReadTimeout, 2 * time.Second},
+		{"WriteTimeout", srv.WriteTimeout, 3 * time.Second},
+		{"IdleTimeout", srv.IdleTimeout, 4 * time.Second},
+		{"MaxHeaderBytes", srv.MaxHeaderBytes, 5000},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("http.Server.%s = %v, want %v (Options.%s)", tc.field, tc.got, tc.want, tc.field)
+		}
+	}
+}

@@ -13,6 +13,19 @@ which is quoted in every section, not by the id alone.
 `contract`, `httpserver`, and `examples/orders` all score 1.000 with no
 survivors, so none has an entry.
 
+**1.000 is not "everything is covered."** go-mutesting does not mutate
+struct-literal field assignments, so a whole class of wiring bug is invisible
+to this gate no matter what the score says. `httpserver`'s six
+`Options` -> `http.Server` copies are the worked example: four of them
+(`ReadTimeout`, `WriteTimeout`, `IdleTimeout`, `MaxHeaderBytes`) could be
+deleted individually with the suite still green and the score still 1.000,
+found by hand at the R1 review, not by this tool. They have a field-for-field
+test now. Read a perfect score as "every mutant the tool generates is killed",
+which is the claim it can actually support -- and when a struct literal is
+load-bearing (an `Options`, a composite config, anything wired once at
+construction), write the test for it directly rather than waiting for a
+survivor that will never appear.
+
 ## `config` Module
 
 **Mutation Score: above threshold, with 5 surviving mutants -- 4 verified
