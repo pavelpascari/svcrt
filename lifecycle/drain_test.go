@@ -158,6 +158,44 @@ func TestStopTimeoutBoundsASlowStopAndOthersStillStop(t *testing.T) {
 	}
 }
 
+// TestDrainDelayLogsOnlyWhenPositive pins the DrainDelay > 0 boundary exactly.
+// At DrainDelay == 0 the "draining" log line (and the Sleep it guards) must
+// not fire -- Config's doc says zero means no delay, and logging "draining,
+// delay=0" would misreport that nothing is actually happening. At the
+// smallest positive duration it must fire. A boundary weakened to >= 0 would
+// wrongly log at zero; one narrowed to > 1ns would wrongly skip logging at
+// exactly 1ns.
+func TestDrainDelayLogsOnlyWhenPositive(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		delay   time.Duration
+		wantLog bool
+	}{
+		{"zero", 0, false},
+		{"oneNanosecond", time.Nanosecond, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var buf bytes.Buffer
+			log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+			lc := lifecycle.New(lifecycle.Config{Logger: log, DrainDelay: tc.delay})
+			lc.OnDrain(func() {})
+			lc.Add("a",
+				func(context.Context) error { return nil },
+				func(context.Context) error { return nil })
+
+			if err := runWithTimeout(t, lc, nil); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(buf.String(), "draining"); got != tc.wantLog {
+				t.Errorf("delay=%v: draining log present = %v, want %v (log: %s)", tc.delay, got, tc.wantLog, buf.String())
+			}
+		})
+	}
+}
+
 func TestPerComponentStopTimeoutOverridesTheDefault(t *testing.T) {
 	t.Parallel()
 	var (

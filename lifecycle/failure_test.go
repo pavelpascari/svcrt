@@ -214,6 +214,78 @@ func TestStopOrderAcrossMultiComponentLevels(t *testing.T) {
 	}
 }
 
+// TestStopSkipsOnlyTheUnstartedSiblingNotEveryoneAfterIt pins continue over
+// break in stopStarted's "was this one even started" guard. "a" and "c" sit
+// on either side of "b" within the same level (all three have no After, so
+// they start concurrently as one level); "b" fails to start while "a" and
+// "c" both succeed. continue skips only "b" and still stops "c"; break would
+// abandon the rest of the level entirely the moment it hit "b", leaving "c"'s
+// Stop uncalled -- a real leak, not a cosmetic one, since nothing else
+// unwinds a level whose WaitGroup never included a started sibling.
+func TestStopSkipsOnlyTheUnstartedSiblingNotEveryoneAfterIt(t *testing.T) {
+	t.Parallel()
+	var r recorder
+	boom := errors.New("boom")
+
+	aStarted := make(chan struct{})
+	cStarted := make(chan struct{})
+	aS, aStop := r.comp("a")
+	cS, cStop := r.comp("c")
+
+	a := func(ctx context.Context) error { defer close(aStarted); return aS(ctx) }
+	c := func(ctx context.Context) error { defer close(cStarted); return cS(ctx) }
+	// b only fails once it has seen both siblings finish their own Start, so
+	// their started[] entries are set before the failure races cancellation.
+	b := func(context.Context) error {
+		<-aStarted
+		<-cStarted
+		time.Sleep(20 * time.Millisecond)
+		return boom
+	}
+
+	lc := lifecycle.New(lifecycle.Config{})
+	lc.Add("a", a, aStop)
+	lc.Add("b", b, func(context.Context) error { t.Error("b never started; its Stop must not run"); return nil })
+	lc.Add("c", c, cStop)
+
+	err := lc.Run(context.Background())
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want boom", err)
+	}
+
+	got := r.snapshot()
+	if !slices.Contains(got, "stop:a") {
+		t.Errorf("ops = %v, want stop:a", got)
+	}
+	if !slices.Contains(got, "stop:c") {
+		t.Errorf("ops = %v, want stop:c (break must not abandon siblings after the unstarted one)", got)
+	}
+}
+
+// TestStopStartedJoinsErrorsFromConcurrentFailingSiblings guards the mutex
+// around errs in stopStarted. "a" and "b" sit at the same level and both fail
+// to Stop, so two goroutines race to Lock/append/Unlock the same mutex. If
+// the Unlock were ever dropped, the second goroutine's Lock would block
+// forever and this test would hang until runWithTimeout's 5s cap fails it --
+// deterministically, since whichever goroutine locks first is guaranteed
+// never to release it under that bug, and the other must wait on the same
+// mutex to append its own error.
+func TestStopStartedJoinsErrorsFromConcurrentFailingSiblings(t *testing.T) {
+	t.Parallel()
+	aErr := errors.New("a stop failed")
+	bErr := errors.New("b stop failed")
+	noop := func(context.Context) error { return nil }
+
+	lc := lifecycle.New(lifecycle.Config{})
+	lc.Add("a", noop, func(context.Context) error { return aErr })
+	lc.Add("b", noop, func(context.Context) error { return bErr })
+
+	err := runWithTimeout(t, lc, nil)
+	if !errors.Is(err, aErr) || !errors.Is(err, bErr) {
+		t.Errorf("err = %v, want both stop failures joined", err)
+	}
+}
+
 // TestStartFailureJoinsUnwindStopError covers Run's startLevel-failure path:
 // a's Start succeeds, so it must be unwound; its Stop fails during that
 // unwind, while b (After a) fails to Start in the first place. Both errors
