@@ -133,10 +133,41 @@ func (l *Lifecycle) Run(ctx context.Context) error {
 		}
 	}
 
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+	case <-l.fatalCh:
+		// fatalErr is written before close, and the receive above gives us
+		// the happens-before to read it without a mutex.
+		l.logf(slog.LevelError, "fatal error; shutting down", "err", l.fatalErr)
+	}
 
 	l.drain()
-	return l.stopStarted(ctx, lv, started)
+	stopErr := l.stopStarted(ctx, lv, started)
+	if l.fatalErr != nil {
+		return errors.Join(l.fatalErr, stopErr)
+	}
+	return stopErr
+}
+
+// Fatal reports a failure that happened AFTER the component started — a
+// listener dying at 3am, a consumer losing its broker — and triggers the same
+// ordered shutdown a signal would.
+//
+// It is a method rather than a channel deliberately. A chan<- error forces
+// buffer-capacity arithmetic, and if the buffer fills or Run has already
+// returned, the sender blocks forever and leaks the goroutine it was reporting
+// from: an error-reporting path that hangs precisely when there is an error.
+//
+// Safe from any goroutine, safe after Run returns, safe to call repeatedly.
+// Only the first non-nil error is kept. A nil error is ignored.
+func (l *Lifecycle) Fatal(err error) {
+	if err == nil {
+		return
+	}
+	l.fatalOnce.Do(func() {
+		l.fatalErr = err
+		close(l.fatalCh)
+	})
 }
 
 // startLevel starts every component in level concurrently.
