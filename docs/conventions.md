@@ -195,3 +195,38 @@ The rule: extract the wiring into a function (`buildXStack` or similar) that
 both `main()` and the tests call. Leave in `main` only what fails loudly — a
 crash, a non-zero exit — never a wiring decision that could fail silently by
 just doing the wrong thing while still returning 0.
+
+## 9. Mutation testing runs in a worktree, never in the repo
+
+`go-mutesting` rewrites source files in place and restores them only on a
+clean exit, so it is not safely interruptible. Killed mid-run — Ctrl-C, a
+timeout, a CI step that exceeds its budget — it leaves tracked files mutated
+on disk.
+
+This repo has hit that five times. Once it left `config/plan.go` and
+`config/source.go` mutated with the whole suite passing against the corrupted
+source, one `git add` from being committed. Once it mutated
+`lifecycle/lifecycle.go` while a reviewer was reading that same file, where an
+injected fault reads exactly like a real concurrency defect.
+
+Each incident was answered with a better detector — a `*.tmp` sweep, a `git
+diff` check against HEAD, a dirty-tree guard. Every detector worked. The
+incidents kept happening, because detection is not prevention: all of it
+relied on nobody running two things at once, and `scripts/mutation.sh` is
+exactly the script you leave running while you do something else.
+
+The rule: `scripts/mutation.sh` mutates a throwaway `git worktree` at HEAD.
+The repo is unreachable by construction, a killed run is recovered with `git
+worktree prune` instead of by restoring source, and two runs — or a run and a
+reviewer — no longer collide. If you find yourself adding another check that
+the working tree survived a mutation run, the isolation has regressed; fix
+that instead.
+
+Two consequences follow, and both are deliberate. Uncommitted changes are not
+mutated, because a worktree is checked out at a commit — the script warns
+when the tree is dirty rather than reporting a score that silently omits your
+edit. And the run uses `go.work` instead of `GOWORK=off`, which is what
+retired the synthesized-module machinery the exemplars used to need: with the
+workspace in scope they resolve their unpublished siblings natively, so no
+`replace` directives have to be injected into a committed `go.mod`. Proving
+each module stands alone is `ci.sh`'s job, and it still does it.

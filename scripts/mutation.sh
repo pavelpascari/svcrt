@@ -6,6 +6,14 @@
 #   With no argument, runs every module in the repo (derived from the go.mod
 #   files on disk, so a module added later cannot be silently ungated).
 #   With an argument, runs only that module (it must exist).
+#
+# Runs at HEAD inside a throwaway `git worktree`, never in the repo -- see the
+# isolation section below for why. Two consequences worth knowing before you
+# read a score:
+#   - uncommitted changes are NOT mutated. The script warns when the tree is
+#     dirty; commit to include them.
+#   - the repo working tree cannot be corrupted by an interrupted run, so this
+#     is safe to kill, and safe to run while something else is using the repo.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO=$(pwd)
@@ -23,26 +31,6 @@ ALL_MODULES=()
 for f in */go.mod examples/*/go.mod; do
   [ -f "$f" ] || continue
   ALL_MODULES+=("${f%/go.mod}")
-done
-
-# Modules whose dependencies resolve only through go.work.
-#
-# go-mutesting needs the module to build on its own, and go.work is not in
-# scope where it runs. Rather than add absolute-path `replace` directives to
-# the committed go.mod -- a real consumer would never carry those, and the
-# exemplar has to stay honest about what consuming these modules looks like --
-# the run happens in a synthesized copy outside the repo with the replaces
-# injected. A side benefit: go-mutesting rewrites sources in place, so a
-# module run this way cannot leave the working tree corrupted at all.
-#
-# Every exemplar under examples/ depends on unpublished sibling modules this
-# way, so this is derived the same way ALL_MODULES' exemplar half is, rather
-# than hand-listed: a third exemplar added later must not silently run
-# unmutated (or, worse, run directly against the repo and get corrupted).
-WORKSPACE_MODULES=()
-for f in examples/*/go.mod; do
-  [ -f "$f" ] || continue
-  WORKSPACE_MODULES+=("${f%/go.mod}")
 done
 
 # Files excluded from a module's mutation run, as "<module>=<file> <file>...".
@@ -160,26 +148,22 @@ excluded_for() {
   done
 }
 
-is_workspace_module() {
-  local m=$1 w
-  for w in "${WORKSPACE_MODULES[@]}"; do
-    [ "$w" = "$m" ] && return 0
-  done
-  return 1
-}
-
 # targets_for prints the go-mutesting targets for a module, resolved inside
-# that module's directory. With nothing excluded that is just ./...; with an
-# exclusion it has to be an explicit file list, because go-mutesting has no
-# exclude flag.
+# that module's directory in the WORKTREE (see below) rather than in the repo.
+# With nothing excluded that is just ./...; with an exclusion it has to be an
+# explicit file list, because go-mutesting has no exclude flag.
+#
+# Globbing the worktree and not the repo matters: the worktree is checked out
+# at HEAD, so an untracked .go file sitting in the repo must not become a
+# target that does not exist where the run happens.
 targets_for() {
-  local m=$1 excl f base skip e
+  local m=$1 root=$2 excl f base skip e
   excl=$(excluded_for "$m")
   if [ -z "$excl" ]; then
     printf './...'
     return
   fi
-  for f in "$m"/*.go; do
+  for f in "$root/$m"/*.go; do
     base=$(basename "$f")
     case "$base" in *_test.go) continue ;; esac
     skip=false
@@ -190,19 +174,55 @@ targets_for() {
   done
 }
 
-# synthesize_module copies a workspace-resolved module to a scratch directory
-# outside the repo and rewrites its go.mod with absolute-path replaces, so it
-# builds with GOWORK=off. Prints the directory.
-synthesize_module() {
-  local m=$1 dir dep
+# --- isolation ---------------------------------------------------------------
+
+# Every module is mutated inside a throwaway `git worktree` at HEAD, never in
+# the repo.
+#
+# go-mutesting rewrites source files IN PLACE and restores them only on a clean
+# exit, which makes it unsafe to interrupt. Run against the repo, an interrupted
+# run leaves tracked files mutated on disk. That is not hypothetical: it has
+# happened five times in this repo's short life -- once leaving config/plan.go
+# and config/source.go mutated with the suite passing against the corrupted
+# source, one `git add` away from being committed, and once mutating
+# lifecycle/lifecycle.go while a reviewer was reading that same file and could
+# have reported the injected fault as a real concurrency defect.
+#
+# Each of those was met with a better detector (a *.tmp sweep, a `git diff`
+# check, a dirty-tree guard) and each detector worked, and the incidents kept
+# happening -- because detection is not prevention and all of it depended on
+# nobody running two things at once. A worktree removes the failure mode
+# instead of catching it: the mutated files are in a directory git will discard,
+# the repo is untouchable by construction, concurrent runs stop conflicting,
+# and a killed run is recovered with `git worktree prune` rather than by
+# restoring source from backups.
+#
+# The worktree also replaces the synthesized-module machinery this script used
+# to carry for the exemplars. go.work is tracked, so it comes along with the
+# checkout and resolves the unpublished sibling modules natively -- which is
+# why the run below does NOT set GOWORK=off. That flag was the whole reason the
+# `replace` directives had to be injected: with the workspace out of scope, an
+# exemplar cannot find its siblings. Proving each module builds standalone is
+# ci.sh's job and it still does it; mutation testing only needs the module to
+# build, so it uses the workspace and keeps the committed go.mod honest.
+WORKTREE=""
+cleanup_worktree() {
+  [ -n "$WORKTREE" ] || return 0
+  git -C "$REPO" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || rm -rf "$WORKTREE"
+  git -C "$REPO" worktree prune >/dev/null 2>&1 || true
+  WORKTREE=""
+}
+# EXIT alone is not enough: the harness this is developed under kills a long run
+# with SIGTERM, and `set -e` aborts through a failed step. Trap the signals too
+# so a killed run still takes its worktree with it.
+trap cleanup_worktree EXIT INT TERM
+
+make_worktree() {
+  local dir
   dir=$(mktemp -d "${TMPDIR:-/tmp}/svcrt-mutation.XXXXXX")
-  cp "$m"/*.go "$dir"/
-  cp "$m/go.mod" "$dir/go.mod"
-  for dep in "${ALL_MODULES[@]}"; do
-    case "$dep" in examples/*) continue ;; esac
-    printf '\nreplace github.com/pavelpascari/svcrt/%s => %s/%s\n' \
-      "$dep" "$REPO" "$dep" >> "$dir/go.mod"
-  done
+  rm -rf "$dir"
+  git -C "$REPO" worktree add --detach "$dir" HEAD >/dev/null 2>&1 ||
+    fail "could not create a git worktree at $dir"
   printf '%s' "$dir"
 }
 
@@ -215,39 +235,39 @@ else
   MODULES=("${ALL_MODULES[@]}")
 fi
 
+# The run happens at HEAD, so uncommitted work is NOT what gets mutated. Say so
+# rather than let someone read a score as covering an edit it never saw. This is
+# a warning and not a failure: "score my committed state" is a legitimate thing
+# to ask for with a dirty tree, and the old in-place behaviour made it
+# impossible.
+if ! git -C "$REPO" diff --quiet HEAD 2>/dev/null; then
+  echo "WARNING: the working tree has uncommitted changes. Mutation runs against"
+  echo "         HEAD ($(git -C "$REPO" rev-parse --short HEAD)) in an isolated worktree, so those"
+  echo "         changes are NOT being mutated. Commit them to include them:"
+  git -C "$REPO" diff --name-only HEAD | sed 's/^/           /'
+  echo
+fi
+
+WORKTREE=$(make_worktree)
+
 for m in "${MODULES[@]}"; do
   echo "== $m =="
 
-  targets=$(targets_for "$m")
-  rundir="$m"
-  scratch=""
-  if is_workspace_module "$m"; then
-    scratch=$(synthesize_module "$m")
-    rundir="$scratch"
-  fi
+  targets=$(targets_for "$m" "$WORKTREE")
 
   set +e
-  out=$(cd "$rundir" && GOWORK=off "$GO_MUTESTING" $targets 2>&1)
+  out=$(cd "$WORKTREE/$m" && "$GO_MUTESTING" $targets 2>&1)
   rc=$?
   set -e
-  [ -n "$scratch" ] && rm -rf "$scratch"
   [ "$rc" -eq 0 ] || fail "$m: go-mutesting failed to run:
 $out"
 
-  # go-mutesting rewrites a module's source files in place while it mutates
-  # them, restoring the originals when it finishes cleanly -- but it is not
-  # safely interruptible. A run killed mid-mutation (Ctrl-C, a timeout, a
-  # crash) can leave tracked files mutated on disk, plus stray *.tmp files
-  # behind. This has happened for real: an interrupted run once left
-  # config/plan.go and config/source.go mutated with tests still passing
-  # against the corrupted source, one git-add away from being committed.
-  # So: sweep any leftover *.tmp files unconditionally, then verify the
-  # module's tracked files still match HEAD before trusting anything the
-  # run reported. Do not remove this thinking it's defensive paranoia --
-  # it exists because of a real incident, not a hypothetical one.
-  find "$m" -name '*.tmp' -delete
-  if ! git diff --exit-code HEAD -- "$m" > /dev/null; then
-    fail "$m: go-mutesting corrupted the working tree (it rewrites source in place and is not safely interruptible). Restore with: git checkout -- $m"
+  # Isolation regression check. The run above mutates files inside $WORKTREE, so
+  # the repo copy of $m must be byte-identical to HEAD afterwards. If this ever
+  # fires, something has reintroduced an in-repo run and the guarantee above is
+  # gone -- fix that rather than deleting this.
+  if ! git -C "$REPO" diff --exit-code HEAD -- "$m" > /dev/null; then
+    fail "$m: the repo working tree changed during a mutation run that should have been confined to $WORKTREE. Restore with: git checkout -- $m"
   fi
 
   line=$(echo "$out" | grep "The mutation score is" || true)
