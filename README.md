@@ -14,6 +14,8 @@ never owns your process — you write `main()`.
 | `contract` | The type vocabulary generated code targets: error interfaces and a typed middleware seam. Imports only `context`. |
 | `config` | Decodes environment variables into a struct once, at construction, reporting every violation at once. |
 | `logging` | A `slog.Handler` that enriches records from their context, plus shared attribute-key conventions. |
+| `lifecycle` | Starts components in dependency order, stops them in reverse, and drains before it stops. Owns no signals — you pass it a context. |
+| `httpserver` | An `http.Server` with timeout defaults that are hard to get wrong, the three Kubernetes health gates, and an admin mux. |
 
 Each is versioned independently, with a per-module tag prefix —
 `contract/v0.1.0`, `config/v0.1.0`. `contract` is *intended* to freeze at v1
@@ -40,7 +42,8 @@ func main() {
 }
 ```
 
-See `examples/orders` for a complete service.
+See `examples/orders` for a complete service, and `examples/worker` for a
+background process with no application HTTP surface.
 
 ## Development
 
@@ -59,6 +62,13 @@ versus keep and test it, and why a supplied test suite is a floor.
 
 ## Status
 
-R0. `contract`, `config`, and `logging` are implemented. `health`,
-`lifecycle`, `httpserver`, `telemetry`, `httpclient`, `resilience`, and
-`testkit` are planned — see `docs/superpowers/specs/`.
+R1. `contract`, `config`, `logging`, `lifecycle`, and `httpserver` are
+implemented. `telemetry`, `httpclient`, `resilience`, and `testkit` are
+planned — see `docs/superpowers/specs/`.
+
+`health` was on that planned list and is not a module. R1 put the three
+probes inside `httpserver` instead: they are served over HTTP, a worker with
+no application HTTP surface still needs an admin listener to answer them
+(`examples/worker`), and a module whose only job is to hand three booleans to
+another module is a boundary that buys nothing. The entry is retired rather
+than left dangling.
