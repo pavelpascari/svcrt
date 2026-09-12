@@ -520,3 +520,136 @@ no goroutines, no timing, no reliance on a specific Go slice-growth
 implementation detail beyond the one empirically pinned above -- and was
 confirmed both ways: it reproduces `!BUG` when `r.Clone()` is removed, and
 stays clean when it is present.
+
+## `lifecycle` Module
+
+**Mutation Score: 0.973684, 3 surviving mutants out of 114, all verified
+equivalent below.** As of Task 5 those are `graph.go.5`, `graph.go.10` and
+`graph.go.17` (line/id numbers per `go-mutesting --do-not-remove-tmp-folder
+--verbose ./...`; re-derive as described at the top of this file if they
+drift). Run `./scripts/mutation.sh lifecycle` for the current score and
+mutant total.
+
+Every other mutant go-mutesting generated for this module -- including 14
+against `lifecycle.go` and 2 against `signal.go` that survived on the first
+mutation run of Task 5 -- turned out to be genuine gaps, not equivalents, and
+is now killed by a test:
+
+- `Add`'s Ref-validation guard (`r.owner != l || r.i < 0 || r.i >= len(l.comps)`)
+  had three weakenable sub-conditions with no test pinning any of their exact
+  boundaries: `TestAddRejectsSelfReferencingRefIndex` (the `>=` boundary, i.e.
+  a Ref pointing at the component currently being added),
+  `TestAddRejectsNegativeRefIndex` (the `r.i < 0` arm, only reachable via a
+  same-owner Ref built from inside the package), and
+  `TestAddReportsEveryInvalidRefNotJustTheFirst` (`continue` vs `break`,
+  proven by checking that two invalid Refs on one component each get their
+  own reported error) — all in `add_internal_test.go`, `package lifecycle`.
+- `defaultStopTimeout`'s literal (15s, weakenable to 14s/16s) is pinned
+  directly in `defaults_internal_test.go` rather than through a multi-second
+  sleep in a suite that also runs under `-race -count=10`.
+- `drain`'s `DrainDelay > 0` guard had no test distinguishing `> 0` from
+  `>= 0`, `> -1`, or `> 1`; `TestDrainDelayLogsOnlyWhenPositive` (`drain_test.go`)
+  checks the "draining" log line's presence at `DrainDelay` of exactly zero
+  (must be absent) and exactly one nanosecond (must be present), which brackets
+  all three mutants.
+- `startLevel`'s and `stopOne`'s `logf` calls for "starting component" and
+  "stopping component" were asserted nowhere; `TestRunLogsStartingAndStoppingComponents`
+  (`logging_test.go`) reads them out of a real `slog.TextHandler`.
+- `stopStarted`'s `if !started[i] { continue }` becoming `break` would abandon
+  every remaining sibling in a level once it hit one that never started, not
+  just skip that one; `TestStopSkipsOnlyTheUnstartedSiblingNotEveryoneAfterIt`
+  (`failure_test.go`) puts an unstarted component between two started ones in
+  the same level and checks the later one still gets stopped.
+- `stopStarted`'s `mu.Unlock()` being dropped is invisible with only one
+  failing `Stop` in a run (the mutex is simply never contended again) but
+  deadlocks the moment a second one does;
+  `TestStopStartedJoinsErrorsFromConcurrentFailingSiblings` (`failure_test.go`)
+  puts two failing `Stop`s in the same level, which hangs the whole test
+  under the mutant and passes cleanly without it.
+- `SignalContext`'s goroutine had two mutants: skipping the `<-ctx.Done()`
+  receive (which, because `signal.NotifyContext`'s `stop` both unregisters
+  the relay **and** cancels the context, would cancel the returned context
+  immediately on every call, no signal needed) is killed by
+  `TestSignalContextDoesNotCancelBeforeAnySignal`; dropping the inner `stop()`
+  call (so a *second* signal is never restored to default handling) is killed
+  by `TestSignalContextSecondSignalRestoresDefaultHandling`, which re-execs
+  the test binary as a child, sends it two SIGTERMs, and checks the child
+  died to the second one via the OS's default disposition rather than still
+  running. Both are in `signal_test.go`.
+
+None of the above turned out to need a source change -- Task 5's
+implementation was already correct; the mutants survived only because no
+test exercised the exact boundary or code path they touched.
+
+### `graph.go`: `levels`' running-max update (`lvl[d]+1 > l`)
+
+```go
+for _, d := range c.after {
+	if lvl[d]+1 > l {
+		l = lvl[d] + 1
+	}
+}
+```
+
+Mutants: `>` → `>=` (`graph.go.5`), `+1` → `+2` on the left side only, not the
+assignment (`graph.go.17`).
+
+This loop computes `l` as the running maximum of `lvl[d]+1` over every
+dependency `d`. The assignment is always `l = lvl[d] + 1` — never anything
+else — so the condition's only job is deciding *whether* to perform that
+exact assignment, and the two mutants only change which cases perform it:
+
+- `>=` (`.5`): the extra case it enables is `lvl[d]+1 == l`. Assigning `l`
+  the value it already equals is a no-op; the final `l` is identical either
+  way, regardless of how many dependencies tie or in what order they are
+  visited.
+- `lvl[d]+2 > l` with the assignment left as `l = lvl[d]+1` (`.17`): the only
+  extra case this enables beyond the original (`lvl[d]+1 > l`) is the single
+  integer value `l == lvl[d]+1` (since `lvl[d]+2 - (lvl[d]+1) == 1`, no other
+  integer `l` satisfies `lvl[d]+1 <= l < lvl[d]+2`). In that case the
+  assignment sets `l` to the value it already holds — again a no-op.
+
+Tried to distinguish both by direct construction (including via
+`add_internal_test.go`'s ability to build arbitrary `component` slices and
+call the unexported `levels` directly, bypassing `Add`'s validation
+entirely): no sequence of dependency levels, tie counts, or visitation
+orders can make either mutant's extra-triggered branch do anything other
+than reassign `l` to its current value. Both are equivalent by construction,
+not by inconvenience.
+
+### `graph.go`: `levels`' `depth` seed (`depth := 0` → `depth := -1`, `graph.go.10`)
+
+```go
+if len(cs) == 0 {
+	return nil
+}
+lvl := make([]int, len(cs))
+depth := 0
+for i, c := range cs {
+	l := 0
+	for _, d := range c.after {
+		if lvl[d]+1 > l {
+			l = lvl[d] + 1
+		}
+	}
+	lvl[i] = l
+	depth = max(depth, l)
+}
+```
+
+The `len(cs) == 0` guard above this code means the loop always runs at least
+once. Its first iteration (`i == 0`) computes `l` starting from `0` and only
+ever raising it via `lvl[d]+1` for `d` in `cs[0].after` — and `lvl[d]` is
+always `>= 0`, either because it is a still-zero-valued slot (`lvl` is
+freshly allocated with `make`) or because it was itself set by this same
+non-negative induction on an earlier iteration. So `l >= 0` on every
+iteration, in particular the first, regardless of what `cs[0].after`
+contains — even a self-referencing `after: []int{0}` built directly by an
+internal test still resolves through the zero-valued `lvl[0]` and produces
+`l >= 0`. `depth = max(depth, l)` on that first iteration therefore always
+lands on the same value whether `depth` started at `0` or `-1`:
+`max(0, l) == max(-1, l)` for every `l >= 0`. Every later iteration only
+raises `depth` further via the same non-negative `l`, so the seed value
+never has another chance to matter. Equivalent by construction: there is no
+`cs` — malformed or not, constructed publicly or via direct internal access
+to `component` — for which the seed is observable.
