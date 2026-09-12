@@ -151,7 +151,9 @@ func TestOnServeErrorFiresWhenTheListenerDies(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Shutdown(context.Background()) })
 
-	s.CloseListenerForTest() // see Step 3
+	if err := s.CloseListener(); err != nil {
+		t.Fatalf("CloseListener: %v", err)
+	}
 
 	select {
 	case err := <-got:
@@ -295,5 +297,36 @@ func TestShutdownReleasesItsLock(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Addr() after Shutdown deadlocked; Shutdown must release its mutex")
+	}
+}
+
+// CloseListener is exported for consumers in other modules, so its contract
+// before Start -- nil, no panic on the nil listener -- is part of the API,
+// not an internal detail.
+func TestCloseListenerBeforeStartIsANoop(t *testing.T) {
+	t.Parallel()
+	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{Addr: "127.0.0.1:0"})
+	if err := s.CloseListener(); err != nil {
+		t.Errorf("CloseListener before Start = %v, want nil", err)
+	}
+}
+
+// CloseListener must report what Close reported, not a blanket nil: a caller
+// that gets nil back believes the listener is gone. Closing twice is the
+// cheapest way to observe a real result, since the second close of a closed
+// listener always fails.
+func TestCloseListenerReportsCloseFailure(t *testing.T) {
+	t.Parallel()
+	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{Addr: "127.0.0.1:0"})
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Shutdown(context.Background()) })
+
+	if err := s.CloseListener(); err != nil {
+		t.Fatalf("first CloseListener = %v, want nil", err)
+	}
+	if err := s.CloseListener(); err == nil {
+		t.Error("second CloseListener = nil; the error from Close is being swallowed")
 	}
 }

@@ -164,3 +164,28 @@ func (s *Server) Addr() string {
 	defer s.mu.Unlock()
 	return s.addr
 }
+
+// CloseListener closes the listener out from under Serve, so Serve fails the
+// way it would if the OS took the socket away. It returns nil if Start has
+// not run, and whatever Close reports otherwise.
+//
+// This exists for tests in *other* modules, and is the only reason it is
+// exported. OnServeError is the edge that turns a dead listener into an
+// ordered shutdown -- the whole point of wiring it to lifecycle.Fatal -- and
+// a service cannot prove it wired that edge without a way to kill its own
+// listener. httpserver can test the edge from inside the package; a consumer
+// composing this Server with a lifecycle cannot, and that wiring going
+// missing is silent in production: the process stays up, the probes stay
+// green, and nothing serves. See examples/orders/lifecycle_test.go.
+//
+// It is not a shutdown. In-flight requests are not drained and the serving
+// goroutine is not discharged -- pair Start with Shutdown for that.
+func (s *Server) CloseListener() error {
+	s.mu.Lock()
+	ln := s.ln
+	s.mu.Unlock()
+	if ln == nil {
+		return nil
+	}
+	return ln.Close()
+}
