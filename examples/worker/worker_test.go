@@ -222,6 +222,32 @@ func TestConsumerStopIsIdempotent(t *testing.T) {
 	if err := c.Stop(context.Background()); err != nil {
 		t.Errorf("second Stop = %v, want nil", err)
 	}
+	// The second Stop must take the already-stopped early-return branch and
+	// actually release the lock there, not fall through and leave it held.
+	// TryLock is non-blocking, so a broken guard fails this test instead of
+	// wedging every later test that touches c.mu.
+	if !c.mu.TryLock() {
+		t.Fatal("second Stop returned with its mutex still held")
+	}
+	c.mu.Unlock()
+}
+
+// TestConsumerStopWithoutStartIsANoop covers a case the idempotent-stop test
+// above does not: a Consumer that was never Start()'d has a nil cancel and a
+// nil done channel, unlike one that has been through a Start/Stop cycle. The
+// early-return guard has to hold on its own here, not just work by accident
+// because leftover state from a prior Start happens to make the fallthrough
+// harmless.
+func TestConsumerStopWithoutStartIsANoop(t *testing.T) {
+	t.Parallel()
+	c := NewConsumer()
+	if err := c.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop on a never-started consumer: %v", err)
+	}
+	if !c.mu.TryLock() {
+		t.Fatal("Stop on a never-started consumer returned with its mutex still held")
+	}
+	c.mu.Unlock()
 }
 
 func TestConsumerStartIsIdempotent(t *testing.T) {
@@ -230,8 +256,16 @@ func TestConsumerStartIsIdempotent(t *testing.T) {
 	if err := c.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	firstDone := c.done
 	if err := c.Start(context.Background()); err != nil {
 		t.Errorf("second Start = %v, want nil", err)
+	}
+	// A second Start while already running must be a true no-op: it must not
+	// replace the running goroutine's done channel, which is exactly what
+	// happens if the "already running" guard is skipped -- the old goroutine
+	// is orphaned and Stop only ever waits on the new one.
+	if c.done != firstDone {
+		t.Error("second Start replaced the running consumer's internal state instead of no-op'ing")
 	}
 	if err := c.Stop(context.Background()); err != nil {
 		t.Fatal(err)

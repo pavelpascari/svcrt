@@ -10,8 +10,8 @@ fix wave; if they do not match what you see, re-derive them with
 mutant against its `.original`. Match entries by the **code they mutate**,
 which is quoted in every section, not by the id alone.
 
-`contract` and `examples/orders` both score 1.000 with no survivors, so
-neither has an entry.
+`contract`, `httpserver`, and `examples/orders` all score 1.000 with no
+survivors, so none has an entry.
 
 ## `config` Module
 
@@ -653,3 +653,57 @@ raises `depth` further via the same non-negative `l`, so the seed value
 never has another chance to matter. Equivalent by construction: there is no
 `cs` — malformed or not, constructed publicly or via direct internal access
 to `component` — for which the seed is observable.
+
+## `examples/worker` Module
+
+**Mutation Score: above threshold, with 2 surviving mutants -- both verified
+equivalent, justified below.** As of the R1 sweep (task 12) those are
+`consumer.go.3` and `consumer.go.4`. `main.go` is excluded from the run
+entirely (see `MUTATION_EXCLUDE` in `scripts/mutation.sh`) for the same
+reason `examples/orders`' is: it binds a real port and installs no seam. Run
+`./scripts/mutation.sh examples/worker` for the current score and mutant
+total.
+
+Two other survivors found during the same sweep were **not** equivalent and
+were killed by strengthening the test suite rather than documented here:
+`Consumer.Start`'s "already running" early return (a missing assertion let a
+second `Start` silently orphan the first goroutine) and `Consumer.Stop`'s
+"not running" early return (untested on a never-`Start`ed consumer, where a
+mutant that skipped the guard's `return` panicked on a nil `cancel`, and one
+that skipped only the `Unlock` left the mutex held forever). See
+`TestConsumerStartIsIdempotent`, `TestConsumerStopWithoutStartIsANoop`, and
+the strengthened `TestConsumerStopIsIdempotent`.
+
+### `consumer.go`: the ticker's polling interval (`50 * time.Millisecond` -> `49` / `51`)
+
+```go
+go func() {
+	defer close(c.done)
+	t := time.NewTicker(50 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			// a real consumer would handle a message here
+		}
+	}
+}()
+```
+
+Mutants: change the literal to `49` or `51` milliseconds.
+
+The `<-t.C` case has an empty body -- the comment says as much; this stands
+in for where a real consumer would do work, and nothing here ever reads how
+often the ticker fired. The only way the interval could become observable is
+through `Stop`'s shutdown latency, and it isn't: `Stop` cancels `ctx`, and
+the loop's `case <-ctx.Done(): return` races the *next* `select` evaluation,
+not the next tick -- the two cases are independent, so cancellation is never
+queued behind whichever period is compiled in. `TestConsumerStopsProcessing`
+and `TestConsumerStopRespectsContextDeadline` both call `Stop` immediately
+after `Start` and neither result depends on the constant's value. No input --
+including a `Stop` deadline deliberately placed close to the tick period --
+distinguishes `49ms`, `50ms`, and `51ms`, because no code path branches on
+elapsed ticks or measures the interval. Equivalent by construction: this
+literal has no observer, not merely one the current tests happen to miss.
