@@ -49,18 +49,15 @@ var (
 // svcgen will generate a handler for: ctx first, one request struct, a
 // pointer response and an error.
 type Service struct {
-	orders map[string]*Order
+	store *Store
 }
 
-func NewService(orders map[string]*Order) *Service {
-	if orders == nil {
-		orders = map[string]*Order{}
-	}
-	return &Service{orders: orders}
+func NewService(store *Store) *Service {
+	return &Service{store: store}
 }
 
 func (s *Service) GetOrder(ctx context.Context, req GetOrderRequest) (*Order, error) {
-	o, ok := s.orders[req.ID]
+	o, ok := s.store.Get(req.ID)
 	if !ok {
 		return nil, notFoundError{id: req.ID}
 	}
