@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -158,13 +159,19 @@ func TestStopOrderAcrossMultiComponentLevels(t *testing.T) {
 	lc := lifecycle.New(lifecycle.Config{})
 	a := lc.Add("a", aS, aStop)
 
+	// once guards the close: nothing drains bothIn, so once both sends land
+	// len(bothIn) stays 2 forever, and if both sends complete before either
+	// length check runs -- ordinary parallelism, no preemption needed -- both
+	// goroutines take the branch and the second close panics with "close of
+	// closed channel", failing a run that has nothing wrong with it.
+	var once sync.Once
 	bothIn := make(chan struct{}, 2)
 	release := make(chan struct{})
 	rendezvousStop := func(name string) lifecycle.StopFunc {
 		return func(context.Context) error {
 			bothIn <- struct{}{}
 			if len(bothIn) == 2 {
-				close(release)
+				once.Do(func() { close(release) })
 			}
 			select {
 			case <-release:

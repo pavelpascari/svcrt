@@ -86,12 +86,20 @@ func TestRunStartsIndependentComponentsConcurrently(t *testing.T) {
 	// Two components at the same level, each blocking until the other has
 	// entered Start. If they were started sequentially this deadlocks, and the
 	// timeout fails the test rather than hanging the suite.
+	// once guards the close: nothing drains bothIn, so once both sends land
+	// len(bothIn) stays 2 forever, and if both sends complete before either
+	// length check runs -- ordinary parallelism, no preemption needed -- both
+	// goroutines take the branch and the second close panics. That would
+	// surface as an unreproducible "close of closed channel" under
+	// -race -count=10, in the module whose whole point is that flakes get
+	// caught here rather than in production.
+	var once sync.Once
 	bothIn := make(chan struct{}, 2)
 	release := make(chan struct{})
 	blocking := func(context.Context) error {
 		bothIn <- struct{}{}
 		if len(bothIn) == 2 {
-			close(release)
+			once.Do(func() { close(release) })
 		}
 		select {
 		case <-release:
