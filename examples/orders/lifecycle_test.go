@@ -25,8 +25,11 @@ func status(t *testing.T, url string) int {
 	return resp.StatusCode
 }
 
-// stack builds the same wiring main() does, with addresses on :0 and a
-// recorder around the store so start/stop order is observable.
+// stack is a thin wrapper around buildStack's result: it adds the ops
+// recorder and the /slow endpoint the acceptance tests need but production
+// never serves. The wiring itself -- health, lifecycle, api, admin -- comes
+// from buildStack, the same function main() calls, so a regression in that
+// wiring is visible here rather than only in a running process.
 type stack struct {
 	lc       *lifecycle.Lifecycle
 	health   *httpserver.Health
@@ -40,19 +43,6 @@ type stack struct {
 func newStack(t *testing.T, drainDelay time.Duration) *stack {
 	t.Helper()
 	s := &stack{slowGate: make(chan struct{})}
-	s.health = httpserver.NewHealth()
-	s.lc = lifecycle.New(lifecycle.Config{DrainDelay: drainDelay})
-	s.lc.OnDrain(s.health.Drain)
-
-	record := func(op string) {
-		s.mu.Lock()
-		s.ops = append(s.ops, op)
-		s.mu.Unlock()
-	}
-
-	store := s.lc.Add("store",
-		func(context.Context) error { record("start:store"); return nil },
-		func(context.Context) error { record("stop:store"); return nil })
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /slow", func(w http.ResponseWriter, r *http.Request) {
@@ -60,21 +50,23 @@ func newStack(t *testing.T, drainDelay time.Duration) *stack {
 		fmt.Fprint(w, "finished")
 	})
 
-	s.api = httpserver.New(mux, httpserver.Options{
-		Addr: "127.0.0.1:0", OnServeError: s.lc.Fatal,
+	built := buildStack(appStackConfig{
+		APIAddr:    "127.0.0.1:0",
+		AdminAddr:  "127.0.0.1:0",
+		DrainDelay: drainDelay,
+		Handler:    mux,
+		StoreOpen:  func(context.Context) error { return nil },
+		StoreClose: func(context.Context) error { return nil },
+		Trace: func(op string) {
+			s.mu.Lock()
+			s.ops = append(s.ops, op)
+			s.mu.Unlock()
+		},
 	})
-	s.lc.Add("api",
-		func(ctx context.Context) error { record("start:api"); return s.api.Start(ctx) },
-		func(ctx context.Context) error { record("stop:api"); return s.api.Shutdown(ctx) },
-		lifecycle.After(store))
-
-	s.admin = httpserver.New(httpserver.AdminMux(s.health), httpserver.Options{
-		Addr: "127.0.0.1:0", OnServeError: s.lc.Fatal,
-	})
-	s.lc.Add("admin",
-		func(ctx context.Context) error { record("start:admin"); return s.admin.Start(ctx) },
-		func(ctx context.Context) error { record("stop:admin"); return s.admin.Shutdown(ctx) },
-		lifecycle.After(store))
+	s.lc = built.lc
+	s.health = built.health
+	s.api = built.api
+	s.admin = built.admin
 
 	return s
 }
@@ -230,5 +222,35 @@ func TestAcceptanceFatalTriggersTheSameDrain(t *testing.T) {
 	ops := s.snapshot()
 	if !slices.Contains(ops, "stop:store") {
 		t.Errorf("ops = %v, want an ordered shutdown after Fatal", ops)
+	}
+}
+
+// buildStack's Trace parameter is optional -- production (main) never sets
+// it. This exercises that default path directly, since none of the
+// acceptance tests above (which all supply a Trace) reach it.
+func TestBuildStackDefaultsTraceToANoop(t *testing.T) {
+	t.Parallel()
+
+	built := buildStack(appStackConfig{
+		APIAddr:    "127.0.0.1:0",
+		AdminAddr:  "127.0.0.1:0",
+		Handler:    http.NewServeMux(),
+		StoreOpen:  func(context.Context) error { return nil },
+		StoreClose: func(context.Context) error { return nil },
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- built.lc.Run(ctx) }()
+	time.Sleep(100 * time.Millisecond)
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return")
 	}
 }
