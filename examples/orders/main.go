@@ -53,6 +53,17 @@ type appStackConfig struct {
 // main runs them. Both main and the acceptance tests call this -- it is the
 // seam that makes the drain behavior observable from a test rather than only
 // from a running binary.
+//
+// The returned stack comes up ready: Started, Live, and Ready are all set
+// true before this function returns, unconditionally, for both callers.
+// That flag-setting used to live in main as three lines a future edit could
+// silently drop -- unlike OnDrain or DrainDelay, a dropped Set(true) fails
+// with no crash and no log line, only every readiness probe returning 503
+// forever, which surfaces as a stalled rollout rather than an error anyone
+// sees. Moving it here removes the line from main that could be forgotten.
+// A service that genuinely needs to warm up before accepting traffic calls
+// health.Ready.Set(false) right after buildStack returns -- one explicit
+// line undoing the default, not three omitted ones creating a silent gap.
 func buildStack(cfg appStackConfig) *appStack {
 	trace := cfg.Trace
 	if trace == nil {
@@ -85,6 +96,10 @@ func buildStack(cfg appStackConfig) *appStack {
 		func(ctx context.Context) error { trace("start:admin"); return admin.Start(ctx) },
 		func(ctx context.Context) error { trace("stop:admin"); return admin.Shutdown(ctx) },
 		lifecycle.After(store))
+
+	health.Started.Set(true)
+	health.Live.Set(true)
+	health.Ready.Set(true)
 
 	return &appStack{lc: lc, health: health, api: api, admin: admin}
 }
@@ -122,14 +137,10 @@ func main() {
 	// Everything below this line is the genuinely untestable part: a real
 	// OS signal handler, and the process-level Run loop that blocks until
 	// one arrives. go test never calls main, so nothing here is observable
-	// by the suite -- which is exactly why the wiring above was extracted
-	// into buildStack instead of living here.
+	// by the suite -- which is exactly why the wiring above, including the
+	// health flags buildStack sets, was extracted instead of living here.
 	ctx, stop := lifecycle.SignalContext(context.Background())
 	defer stop()
-
-	s.health.Started.Set(true)
-	s.health.Live.Set(true)
-	s.health.Ready.Set(true)
 
 	if err := s.lc.Run(ctx); err != nil {
 		log.Error("stopped", "err", err)

@@ -84,10 +84,6 @@ func TestAcceptanceStartsInDependencyOrder(t *testing.T) {
 	go func() { done <- s.lc.Run(ctx) }()
 	time.Sleep(100 * time.Millisecond)
 
-	s.health.Started.Set(true)
-	s.health.Ready.Set(true)
-	s.health.Live.Set(true)
-
 	ops := s.snapshot()
 	storeAt := slices.Index(ops, "start:store")
 	apiAt := slices.Index(ops, "start:api")
@@ -104,16 +100,15 @@ func TestAcceptanceStartsInDependencyOrder(t *testing.T) {
 	}
 }
 
+// buildStack brings the stack up ready with no help from the caller -- this
+// asserts that default directly, rather than the test priming it with its
+// own Set(true) calls first.
 func TestAcceptanceProbesAnswerAfterBoot(t *testing.T) {
 	s := newStack(t, 0)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- s.lc.Run(ctx) }()
 	time.Sleep(100 * time.Millisecond)
-
-	s.health.Started.Set(true)
-	s.health.Ready.Set(true)
-	s.health.Live.Set(true)
 
 	base := "http://" + s.admin.Addr()
 	for _, p := range []string{"/startupz", "/readyz", "/healthz"} {
@@ -135,10 +130,6 @@ func TestAcceptanceDrainFlipsReadinessBeforeStoppingAndCompletesInFlight(t *test
 	done := make(chan error, 1)
 	go func() { done <- s.lc.Run(ctx) }()
 	time.Sleep(100 * time.Millisecond)
-
-	s.health.Started.Set(true)
-	s.health.Ready.Set(true)
-	s.health.Live.Set(true)
 
 	adminBase := "http://" + s.admin.Addr()
 
@@ -205,7 +196,6 @@ func TestAcceptanceFatalTriggersTheSameDrain(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- s.lc.Run(context.Background()) }()
 	time.Sleep(100 * time.Millisecond)
-	s.health.Ready.Set(true)
 
 	close(s.slowGate)
 	s.lc.Fatal(fmt.Errorf("listener died"))
