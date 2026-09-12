@@ -104,3 +104,39 @@ func TestFatalNilIsIgnored(t *testing.T) {
 		t.Fatal("Run did not return after cancel")
 	}
 }
+
+// TestFatalRacesCleanlyAgainstContextCancellation is the regression for a
+// data race a reviewer caught: Run's select read fatalErr as a plain field,
+// which is only safe on the <-l.fatalCh arm (close(fatalCh) supplies the
+// happens-before there). On the <-ctx.Done() arm -- which wins when a signal
+// and a component's Fatal call land at the same instant, an entirely
+// realistic interleaving -- there was no synchronization at all between the
+// write in Fatal and the read in Run.
+//
+// This test races cancel() and Fatal() from two goroutines with no
+// synchronization between them, deliberately not giving either one a head
+// start. It does not assert which of the two reasons Run reports -- that is
+// genuinely arbitrary when they tie -- only that Run returns and that -race
+// reports nothing.
+func TestFatalRacesCleanlyAgainstContextCancellation(t *testing.T) {
+	t.Parallel()
+	noop := func(context.Context) error { return nil }
+	lc := lifecycle.New(lifecycle.Config{})
+	lc.Add("a", noop, noop)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- lc.Run(ctx) }()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); cancel() }()
+	go func() { defer wg.Done(); lc.Fatal(errors.New("boom")) }()
+	wg.Wait()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return within 5s")
+	}
+}

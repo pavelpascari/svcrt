@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -63,7 +64,7 @@ type Lifecycle struct {
 
 	fatalOnce sync.Once
 	fatalCh   chan struct{}
-	fatalErr  error
+	fatalErr  atomic.Pointer[error]
 }
 
 // New returns a Lifecycle. Zero-valued Config fields take their defaults.
@@ -133,18 +134,36 @@ func (l *Lifecycle) Run(ctx context.Context) error {
 		}
 	}
 
+	// fatalErr is an atomic.Pointer, not a plain error read after the
+	// happens-before close(fatalCh) would give us: that ordering only covers
+	// the <-l.fatalCh arm below. When <-ctx.Done() wins instead -- a signal
+	// landing at the same instant a component fails, which is entirely
+	// realistic -- there is no happens-before between this select and a
+	// concurrent Fatal call at all, and a plain field read there would race.
+	// The atomic makes every read below safe regardless of which arm fired.
 	select {
 	case <-ctx.Done():
 	case <-l.fatalCh:
-		// fatalErr is written before close, and the receive above gives us
-		// the happens-before to read it without a mutex.
-		l.logf(slog.LevelError, "fatal error; shutting down", "err", l.fatalErr)
+		// Fatal stores fatalErr before closing fatalCh, so by the time this
+		// receive completes fatalErr is guaranteed non-nil: close is what
+		// makes THIS load observe the store, on top of the atomic making it
+		// race-free to begin with.
+		fe := l.fatalErr.Load()
+		l.logf(slog.LevelError, "fatal error; shutting down", "err", *fe)
 	}
 
 	l.drain()
 	stopErr := l.stopStarted(ctx, lv, started)
-	if l.fatalErr != nil {
-		return errors.Join(l.fatalErr, stopErr)
+	// Loaded again rather than reused from the select above: the ctx.Done()
+	// arm may have fired with no Fatal call yet, and Fatal can still land
+	// during drain or stop -- e.g. a component dying while a sibling is
+	// stopping -- so this is the last chance to pick it up.
+	//
+	// A genuine tie between a signal and Fatal landing at the same instant
+	// may still report only the shutdown cause: the shutdown happens either
+	// way, and which of the two "reasons" wins is inherently arbitrary.
+	if fe := l.fatalErr.Load(); fe != nil {
+		return errors.Join(*fe, stopErr)
 	}
 	return stopErr
 }
@@ -165,7 +184,7 @@ func (l *Lifecycle) Fatal(err error) {
 		return
 	}
 	l.fatalOnce.Do(func() {
-		l.fatalErr = err
+		l.fatalErr.Store(&err)
 		close(l.fatalCh)
 	})
 }
