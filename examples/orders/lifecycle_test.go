@@ -84,11 +84,19 @@ func TestAcceptanceStartsInDependencyOrder(t *testing.T) {
 	go func() { done <- s.lc.Run(ctx) }()
 	time.Sleep(100 * time.Millisecond)
 
+	// Both dependents, not just the api: admin is After(store) too, and
+	// nothing else in this suite observes that edge -- moving buildStack into
+	// stack.go, where the mutation gate can see it, showed the admin trace
+	// calls surviving deletion for exactly that reason.
 	ops := s.snapshot()
 	storeAt := slices.Index(ops, "start:store")
 	apiAt := slices.Index(ops, "start:api")
+	adminAt := slices.Index(ops, "start:admin")
 	if storeAt < 0 || apiAt < 0 || storeAt > apiAt {
 		t.Errorf("ops = %v, want store started before api", ops)
+	}
+	if adminAt < 0 || storeAt > adminAt {
+		t.Errorf("ops = %v, want store started before admin", ops)
 	}
 
 	close(s.slowGate)
@@ -185,9 +193,13 @@ func TestAcceptanceDrainFlipsReadinessBeforeStoppingAndCompletesInFlight(t *test
 
 	ops := s.snapshot()
 	apiStop := slices.Index(ops, "stop:api")
+	adminStop := slices.Index(ops, "stop:admin")
 	storeStop := slices.Index(ops, "stop:store")
 	if apiStop < 0 || storeStop < 0 || apiStop > storeStop {
 		t.Errorf("ops = %v, want api stopped before store (reverse order)", ops)
+	}
+	if adminStop < 0 || adminStop > storeStop {
+		t.Errorf("ops = %v, want admin stopped before store (reverse order)", ops)
 	}
 }
 

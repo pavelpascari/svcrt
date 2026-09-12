@@ -673,7 +673,10 @@ to `component` — for which the seed is observable.
 equivalent, justified below.** As of the R1 sweep (task 12) those are
 `consumer.go.3` and `consumer.go.4`. `main.go` is excluded from the run
 entirely (see `MUTATION_EXCLUDE` in `scripts/mutation.sh`) for the same
-reason `examples/orders`' is: it binds a real port and installs no seam. Run
+reason `examples/orders`' is: since the R1 fix wave it holds `func main()`
+and nothing else -- config load, logger, a real OS signal handler, `Run`,
+`os.Exit` -- none of which a test binary can reach. The wiring both mains
+call lives in `stack.go` and is mutated like any other file. Run
 `./scripts/mutation.sh examples/worker` for the current score and mutant
 total.
 
