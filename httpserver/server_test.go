@@ -189,6 +189,22 @@ func TestAddrBeforeStartIsTheConfiguredValue(t *testing.T) {
 	}
 }
 
+func TestStartWithAPreCancelledContextAbortsTheBind(t *testing.T) {
+	t.Parallel()
+	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{Addr: "127.0.0.1:0"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := s.Start(ctx); err == nil {
+		_ = s.Shutdown(context.Background())
+		t.Fatal("Start succeeded with a pre-cancelled context")
+	}
+	if addr := s.Addr(); addr != "127.0.0.1:0" {
+		t.Errorf("Addr() = %q after a failed Start, want the unresolved configured address", addr)
+	}
+}
+
 func TestShutdownBeforeStartIsANoOp(t *testing.T) {
 	t.Parallel()
 	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{Addr: "127.0.0.1:0"})

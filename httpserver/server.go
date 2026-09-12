@@ -68,8 +68,20 @@ func New(h http.Handler, opts Options) *Server {
 }
 
 // Start binds the listener and returns once it is accepting. Serving happens
-// in a goroutine this Server owns.
+// in a goroutine this Server owns, and that goroutine runs until process exit
+// if Shutdown is never called — pair Start with Shutdown (for example
+// lc.Add("api", srv.Start, srv.Shutdown)) so the goroutine is always
+// discharged.
+//
+// Start returns immediately, before binding, if ctx is already cancelled. A
+// cancellation that arrives during the bind itself is not aborted: the bind
+// window is tiny, and a lifecycle's unwind stops anything that did bind, so
+// the cost of that residual is a little wasted work, not a leaked listener.
 func (s *Server) Start(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", s.opts.Addr)
 	if err != nil {
