@@ -138,7 +138,17 @@ func (l *Lifecycle) Run(ctx context.Context) error {
 }
 
 // startLevel starts every component in level concurrently.
+//
+// On the first failure the level's context is cancelled and every in-flight
+// Start is WAITED FOR. Waiting rather than returning immediately is what keeps
+// the unwind correct: an abandoned Start may have bound a listener or opened a
+// pool that nothing is tracking, and Stop is never called for a Start that
+// never returned. Cancelling rather than waiting for natural completion is what
+// keeps a doomed boot from hanging for the duration of its slowest component.
 func (l *Lifecycle) startLevel(ctx context.Context, level []int, started []bool) error {
+	lctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	var wg sync.WaitGroup
 	errs := make([]error, len(level))
 	for n, i := range level {
@@ -146,8 +156,9 @@ func (l *Lifecycle) startLevel(ctx context.Context, level []int, started []bool)
 		go func() {
 			defer wg.Done()
 			l.logf(slog.LevelInfo, "starting component", "component", l.comps[i].name)
-			if err := l.comps[i].start(ctx); err != nil {
+			if err := l.comps[i].start(lctx); err != nil {
 				errs[n] = fmt.Errorf("lifecycle: %s: start: %w", l.comps[i].name, err)
+				cancel() // tell the siblings to give up
 				return
 			}
 			started[i] = true
