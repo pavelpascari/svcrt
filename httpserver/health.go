@@ -28,6 +28,16 @@ type Gate struct {
 	// It exists because the error must not reach the wire (a 503 body carries
 	// check names, never prose) but must reach somewhere: wire this to your
 	// logger in main.
+	//
+	// SET IT BEFORE THIS GATE IS SERVED, AND DO NOT CHANGE IT AFTERWARDS.
+	// Unlike open and checks, this field is a plain field with no
+	// synchronization, and ServeHTTP reads it from every request goroutine --
+	// so assigning it once the admin server is accepting is a data race. It
+	// is deliberately not an atomic or a mutex-guarded setter: a logger
+	// swapped mid-flight is not a thing services need, and the cost of
+	// pretending otherwise is an atomic load on every failing check plus an
+	// API that implies a capability nobody should use. The one supported
+	// order is construct, wire, then serve.
 	OnCheckError func(name string, err error)
 
 	mu     sync.Mutex
