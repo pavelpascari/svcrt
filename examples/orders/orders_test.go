@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -196,4 +197,47 @@ func TestStoreGetReturnsNotFoundAfterClose(t *testing.T) {
 	if _, ok := s.Get("1"); ok {
 		t.Error("Get(1) succeeded after Close; want not-found")
 	}
+}
+
+// TestStoreGetIsSafeConcurrentlyWithClose pins the reason Store.open is
+// atomic. Get's doc promises a request arriving after shutdown reads no stale
+// data, which is a statement about Get and Close running at the same time --
+// and the exemplar is teaching material, so the code has to make that claim
+// true rather than rely on the dependency edge happening to serialize them.
+// It does not always: api is After(store), so api.Shutdown normally drains
+// before store.Close, but a Shutdown that returns on its deadline instead
+// (a handler slower than StopTimeout, or a hijacked connection) leaves Close
+// writing while Get reads. With a plain bool this fails under -race.
+//
+// The acceptance suites cannot catch this: they substitute their own
+// StoreOpen/StoreClose and never touch the real Store.
+func TestStoreGetIsSafeConcurrentlyWithClose(t *testing.T) {
+	t.Parallel()
+	st := NewStore(map[string]*Order{"1": {ID: "1", Qty: 3}})
+	if err := st.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			st.Get("1")
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			if err := st.Close(context.Background()); err != nil {
+				t.Error(err)
+				return
+			}
+			if err := st.Open(context.Background()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
 }
