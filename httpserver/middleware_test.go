@@ -77,6 +77,12 @@ func TestChainDoesNotMutateItsInput(t *testing.T) {
 	// closure's underlying pointer. This catches Chain replacing an element
 	// with a different (even non-nil) middleware, which a nilness-only
 	// comparison cannot.
+	//
+	// reflect.Value.Pointer() is documented as "not necessarily enough to
+	// identify a single function uniquely" — empirically (gc, this Go
+	// version) it does distinguish distinct closures from the same literal,
+	// which is what this test relies on. On a toolchain where that stops
+	// holding, this test can pass vacuously (false negative) rather than fail.
 	before := make([]uintptr, len(ms))
 	for i, m := range ms {
 		before[i] = reflect.ValueOf(m).Pointer()

@@ -22,6 +22,14 @@ type readyCheck struct {
 type Gate struct {
 	open atomic.Bool
 
+	// OnCheckError is called when a readiness check fails, with the check's
+	// name and its error. Nil means the cause is discarded.
+	//
+	// It exists because the error must not reach the wire (a 503 body carries
+	// check names, never prose) but must reach somewhere: wire this to your
+	// logger in main.
+	OnCheckError func(name string, err error)
+
 	mu     sync.Mutex
 	checks []readyCheck
 }
@@ -31,7 +39,7 @@ func (g *Gate) Set(ok bool) { g.open.Store(ok) }
 
 // ServeHTTP answers 200 when the gate is open and every check passes, and 503
 // otherwise. A failing response names the checks that failed and nothing else:
-// the check's error text is the caller's to log, never to serialize.
+// the check's error is reported via OnCheckError (if set), never serialized.
 func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !g.open.Load() {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -49,6 +57,9 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		err := c.fn(ctx)
 		cancel()
 		if err != nil {
+			if g.OnCheckError != nil {
+				g.OnCheckError(c.name, err)
+			}
 			failed = append(failed, c.name)
 		}
 	}
@@ -84,11 +95,19 @@ func NewHealth() *Health {
 
 // AddReadyCheck registers a dependency check on the READINESS gate.
 //
-// There is deliberately no AddLiveCheck. A liveness probe that fails when the
-// database is unreachable makes Kubernetes restart a perfectly healthy process
-// during a database outage, turning a degraded service into a crash-loop across
-// every replica at once. Making that unrepresentable is the entire reason this
-// type exists rather than three bare atomic.Bools.
+// There is deliberately no AddLiveCheck: no exported API attaches a
+// dependency check to Live or Started, and Gate's checks field is
+// unexported, so a Gate carrying checks cannot be constructed from outside
+// this package. That is what is actually prevented — a caller cannot reach
+// for an AddLiveCheck that does not exist, or smuggle checks onto Live by
+// any means this package exposes.
+//
+// What is NOT prevented: Health.Live, .Ready, and .Started are exported
+// *Gate fields — they have to be, so main can mount them and call Set — and
+// nothing stops a caller from writing h.Live = h.Ready, aliasing liveness
+// onto a dependency-gated probe and defeating the separation this type
+// exists for. That is not an accident this type can catch; it is a caller
+// rewriting their own wiring. Don't do it.
 func (h *Health) AddReadyCheck(name string, fn func(context.Context) error) {
 	h.Ready.mu.Lock()
 	defer h.Ready.mu.Unlock()

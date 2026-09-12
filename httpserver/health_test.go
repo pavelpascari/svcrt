@@ -90,6 +90,49 @@ func TestReadyCheckFailureReturns503WithTheCheckName(t *testing.T) {
 	}
 }
 
+func TestOnCheckErrorReceivesTheNameAndError(t *testing.T) {
+	t.Parallel()
+	h := httpserver.NewHealth()
+	h.Ready.Set(true)
+	wantErr := errors.New("dial tcp 10.0.0.5: refused")
+	h.AddReadyCheck("db", func(context.Context) error { return wantErr })
+
+	var gotName string
+	var gotErr error
+	h.Ready.OnCheckError = func(name string, err error) {
+		gotName = name
+		gotErr = err
+	}
+
+	code, body := probe(t, h.Ready)
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", code)
+	}
+	if gotName != "db" {
+		t.Errorf("OnCheckError name = %q, want %q", gotName, "db")
+	}
+	if !errors.Is(gotErr, wantErr) {
+		t.Errorf("OnCheckError err = %v, want %v", gotErr, wantErr)
+	}
+	// The callback is where the cause goes; the wire still only gets the name.
+	if strings.Contains(body, "10.0.0.5") || strings.Contains(body, "refused") {
+		t.Errorf("body leaked the check's error text: %s", body)
+	}
+}
+
+func TestNilOnCheckErrorDoesNotPanic(t *testing.T) {
+	t.Parallel()
+	h := httpserver.NewHealth()
+	h.Ready.Set(true)
+	h.AddReadyCheck("db", func(context.Context) error { return errors.New("boom") })
+
+	// h.Ready.OnCheckError is left nil: ServeHTTP must not dereference it.
+	code, _ := probe(t, h.Ready)
+	if code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", code)
+	}
+}
+
 func TestReadyPassesWhenAllChecksPass(t *testing.T) {
 	t.Parallel()
 	h := httpserver.NewHealth()
