@@ -80,10 +80,21 @@ func New(cfg Config) *Lifecycle {
 //
 // Declaration order is dependency order: After can only name a component
 // already added, which is what makes a cycle unrepresentable.
+//
+// A nil start or stop is a construction error returned by Run, not a silent
+// no-op: a component with nothing to do on one side passes an explicit no-op,
+// func(context.Context) error { return nil }, so a forgotten field fails
+// loudly at construction rather than panicking deep inside Run.
 func (l *Lifecycle) Add(name string, start StartFunc, stop StopFunc, opts ...Option) Ref {
 	c := component{name: name, start: start, stop: stop}
 	for _, o := range opts {
 		o(&c)
+	}
+	if start == nil {
+		l.errs = append(l.errs, fmt.Errorf("lifecycle: %s: start is nil; a component with nothing to start needs an explicit no-op StartFunc", name))
+	}
+	if stop == nil {
+		l.errs = append(l.errs, fmt.Errorf("lifecycle: %s: stop is nil; a component with nothing to stop needs an explicit no-op StopFunc", name))
 	}
 	// Resolve each declared Ref to an index, rejecting any that does not
 	// belong to this Lifecycle or that names a component this Lifecycle
