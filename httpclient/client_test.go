@@ -37,8 +37,19 @@ func transportOf(t *testing.T, c *http.Client) *http.Transport {
 // to HTTP/1.1 and disable every proxy environment variable with the suite
 // still green. Proxy and DialContext are funcs, which are not comparable --
 // hence the uintptr: reflect.Value.Pointer() is a legal comparable stand-in
-// for func identity, which is all this test needs, and it keeps the struct
-// comparable so `before != after` compiles and copylocks stays happy.
+// for func identity, and it keeps the struct comparable so `before != after`
+// compiles and copylocks stays happy.
+//
+// What that stand-in does and does not catch, established by running it:
+// Pointer() returns a CODE pointer, so nil-ing a func field is caught, and
+// replacing it with a different function is caught (verified for both Proxy
+// and DialContext). What it cannot see is one method value replaced by
+// another method value of the SAME method on a different receiver -- every
+// (*net.Dialer).DialContext in the process shares one code pointer. Proxy is
+// a plain top-level func (http.ProxyFromEnvironment) so it has no such blind
+// spot; DialContext does, and no stdlib-only alternative closes it, since
+// evaluating a method value allocates a fresh closure each time and so cannot
+// be compared by address either. Recorded rather than papered over.
 type transportSnapshot struct {
 	maxIdleConns          int
 	maxIdleConnsPerHost   int
