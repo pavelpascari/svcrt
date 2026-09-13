@@ -498,3 +498,60 @@ func TestAcceptanceThePricingCallActuallyWaitsBetweenRetries(t *testing.T) {
 		t.Errorf("elapsed = %v, want >= 15ms; two 10ms backoffs must actually happen between retries", elapsed)
 	}
 }
+
+// TestAcceptanceRetriesReuseOneConnection is spec §7 criterion 6: count
+// StateNew on the upstream and require ONE connection across a multi-attempt
+// retry, not one per attempt.
+//
+// This is the effect draining exists for, and nothing else in the repo
+// asserts it end to end. resilience's own TestADiscardedResponseIsDrainedAndClosed
+// puts a fake body behind a fake RoundTripper and checks read-to-EOF plus
+// Close -- a good, fast unit gate, but there is no socket in it. Delete the
+// io.Copy from resilience's drain and all three retry acceptance tests above
+// stay green while the upstream sees three connections for three attempts:
+// every retry burning a fresh TCP handshake, in the exemplar whose whole job
+// is to show the stack working.
+func TestAcceptanceRetriesReuseOneConnection(t *testing.T) {
+	var attempts, conns atomic.Int64
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			// A body worth draining: a discarded response with nothing in it
+			// would be reusable whether or not drain read it.
+			fmt.Fprint(w, strings.Repeat("upstream is warming up. ", 100))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"amount_minor":1250}`)
+	}))
+	// Set before Start, like the shutdown test above: the server reads
+	// ConnState from its own goroutine once it is serving.
+	upstream.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	upstream.Start()
+	defer upstream.Close()
+
+	s := newStack(t, 0, upstream.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.lc.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	amount, err := s.pricing.Quote(context.Background(), "SKU-1")
+	if err != nil {
+		t.Fatalf("Quote: %v", err)
+	}
+	if amount != 1250 {
+		t.Errorf("amount = %d, want 1250", amount)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("upstream saw %d attempts, want 3 (two failures then a success)", got)
+	}
+	if got := conns.Load(); got != 1 {
+		t.Errorf("upstream accepted %d connections for 3 attempts, want 1: a discarded response is not being drained, so its connection never returns to the pool and every retry pays for a fresh TCP handshake", got)
+	}
+}
