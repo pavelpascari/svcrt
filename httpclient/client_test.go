@@ -20,6 +20,29 @@ func transportOf(t *testing.T, c *http.Client) *http.Transport {
 	return tr
 }
 
+// http.Transport contains a sync.Mutex, so copying one by value trips vet's
+// copylocks check -- and `go test` does not run copylocks, so it fails only in
+// ci.sh's `go vet`. Snapshot the fields under test instead.
+type transportSnapshot struct {
+	maxIdleConns          int
+	maxIdleConnsPerHost   int
+	idleConnTimeout       time.Duration
+	tlsHandshakeTimeout   time.Duration
+	responseHeaderTimeout time.Duration
+	expectContinueTimeout time.Duration
+}
+
+func snapshotTransport(tr *http.Transport) transportSnapshot {
+	return transportSnapshot{
+		maxIdleConns:          tr.MaxIdleConns,
+		maxIdleConnsPerHost:   tr.MaxIdleConnsPerHost,
+		idleConnTimeout:       tr.IdleConnTimeout,
+		tlsHandshakeTimeout:   tr.TLSHandshakeTimeout,
+		responseHeaderTimeout: tr.ResponseHeaderTimeout,
+		expectContinueTimeout: tr.ExpectContinueTimeout,
+	}
+}
+
 func TestZeroOptionsProduceTheDocumentedDefaults(t *testing.T) {
 	t.Parallel()
 	c := httpclient.New(httpclient.Options{})
@@ -142,20 +165,15 @@ func TestNewDoesNotTouchTheProcessGlobals(t *testing.T) {
 	// Deliberately NOT t.Parallel: this test reads process-wide state, and a
 	// parallel sibling constructing clients would make it meaningless.
 	dt := http.DefaultTransport.(*http.Transport)
-	before := *dt // shallow copy of every exported field
+	before := snapshotTransport(dt)
 
 	c := httpclient.New(httpclient.Options{
 		MaxIdleConnsPerHost: 999,
 		IdleConnTimeout:     42 * time.Second,
 	})
 
-	after := *dt
-	if before.MaxIdleConnsPerHost != after.MaxIdleConnsPerHost ||
-		before.IdleConnTimeout != after.IdleConnTimeout ||
-		before.MaxIdleConns != after.MaxIdleConns ||
-		before.TLSHandshakeTimeout != after.TLSHandshakeTimeout ||
-		before.ResponseHeaderTimeout != after.ResponseHeaderTimeout ||
-		before.ExpectContinueTimeout != after.ExpectContinueTimeout {
+	after := snapshotTransport(dt)
+	if before != after {
 		t.Error("New mutated http.DefaultTransport; it must build a fresh one")
 	}
 
