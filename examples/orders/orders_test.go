@@ -274,6 +274,21 @@ func TestAcceptanceTheStackCallsPricingThroughTheClient(t *testing.T) {
 	if got := hits.Load(); got != 1 {
 		t.Errorf("upstream hits = %d, want 1", got)
 	}
+
+	// Pin WHICH client the stack built. Replacing httpclient.New(...) with
+	// &http.Client{} satisfies every assertion above -- while using
+	// http.DefaultTransport, the one thing httpclient exists to avoid. That
+	// mutant survived the whole suite at the R2 review. MaxIdleConnsPerHost
+	// is httpclient.New's headline deviation and both http.Transport and
+	// http.DefaultTransport leave it zero, so it identifies the constructor
+	// without the test having to reach for one.
+	tr, ok := s.pricing.http.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("pricing client transport is %T; the stack must build it with httpclient.New, not a bare &http.Client{} on http.DefaultTransport", s.pricing.http.Transport)
+	}
+	if tr.MaxIdleConnsPerHost != 100 {
+		t.Errorf("pricing transport MaxIdleConnsPerHost = %d, want 100; the stack must build the client with httpclient.New", tr.MaxIdleConnsPerHost)
+	}
 }
 
 // The client must be released at shutdown, and buildStack is where that wiring
