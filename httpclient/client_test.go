@@ -1,8 +1,11 @@
 package httpclient_test
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -214,5 +217,93 @@ func TestHTTP2SurvivesTheCustomDialer(t *testing.T) {
 
 	if resp.Proto != "HTTP/2.0" {
 		t.Errorf("resp.Proto = %q, want \"HTTP/2.0\" -- a custom DialContext disabled HTTP/2 silently", resp.Proto)
+	}
+}
+
+func TestMiddlewareWrapsTheTransportNewBuilt(t *testing.T) {
+	t.Parallel()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer ts.Close()
+
+	var seen []string
+	mw := func(name string) httpclient.Middleware {
+		return func(next http.RoundTripper) http.RoundTripper {
+			return httpclient.RoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+				seen = append(seen, name)
+				return next.RoundTrip(r)
+			})
+		}
+	}
+
+	c := httpclient.New(httpclient.Options{
+		Middleware: httpclient.Chain(mw("outer"), mw("inner")),
+	})
+
+	resp, err := c.Get(ts.URL)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Both ran, outermost first, and the request still reached the server --
+	// proving the chain wraps the real transport rather than replacing it.
+	if len(seen) != 2 || seen[0] != "outer" || seen[1] != "inner" {
+		t.Errorf("middleware order = %v, want [outer inner]", seen)
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+}
+
+func TestNilMiddlewareLeavesTheTransportUnwrapped(t *testing.T) {
+	t.Parallel()
+	c := httpclient.New(httpclient.Options{Middleware: nil})
+	if _, ok := c.Transport.(*http.Transport); !ok {
+		t.Errorf("c.Transport is %T, want the *http.Transport New built", c.Transport)
+	}
+}
+
+func TestContextCancellationAbortsAnInFlightRequest(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	var served atomic.Bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		served.Store(true)
+		<-release // hold the request open until the test releases it
+	}))
+	defer func() { close(release); ts.Close() }()
+
+	c := httpclient.New(httpclient.Options{})
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(ctx, "GET", ts.URL, nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		resp, err := c.Do(req)
+		if resp != nil {
+			resp.Body.Close()
+		}
+		done <- err
+	}()
+
+	// Wait until the server has the request, so cancellation lands mid-flight
+	// rather than before the dial.
+	for !served.Load() {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Do err = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelling the context did not abort the request within 5s")
 	}
 }
