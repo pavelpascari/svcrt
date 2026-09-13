@@ -41,13 +41,16 @@ when an option must carry behaviour, when options are expected to be added by
 modules that do not exist yet, or when the zero value of some field would be a
 dangerous default that a struct literal lets a caller omit by accident.
 
-## 2. `Middleware` means four things, on purpose
+## 2. `Middleware` means four things, on purpose — never a fifth
 
 R0 declared two spellings of `Middleware` and warned a third would be one too
 many. R1 added the third anyway, deliberately, once `httpserver` needed a
 name for the shape the other two were already describing in prose. R2 added a
 fourth, the client-side mirror of that third, once `httpclient` needed the
-same shape on `http.RoundTripper` instead of `http.Handler`. All four stand:
+same shape on `http.RoundTripper` instead of `http.Handler`. R3 needed that
+exact shape again, for `resilience`'s retry and timeout middleware, and did
+not add a fifth — see below for why declaring one would have been a mistake,
+not just a style preference. All four stand:
 
 - `contract.Middleware[Req, Res]` is a **generic type**: the call-level seam,
   `func(Handler[Req, Res]) Handler[Req, Res]`. It exists so hand-written and
@@ -89,9 +92,31 @@ The split is along the transport/call boundary, not along taste:
 So: one generic type for the call level, one plain type for the server-side
 transport level, one plain type for the client-side transport level, and as
 many constructors returning the relevant plain type as there are
-transport-level concerns. A new module never declares a second
-call-level, server-side, or client-side `Middleware` type — it names its
-constructor and returns the existing one.
+transport-level concerns. A new module that owns, or may import, the package
+holding the type it targets never declares a second call-level, server-side,
+or client-side `Middleware` type — it names its constructor and returns the
+existing one.
+
+A module that targets someone else's type *without* importing that type's
+package is a different case, not a fifth spelling: it must return the bare,
+unnamed func type instead of a same-shaped type of its own. `resilience` is
+the worked example. `Retry` and `Timeout` wrap `http.RoundTripper` —
+exactly `httpclient.Middleware`'s shape — but `resilience` depends on
+nothing outside the standard library, so it cannot import `httpclient` to
+name its return type `httpclient.Middleware`. Declaring
+`type Middleware func(http.RoundTripper) http.RoundTripper` in `resilience`
+instead, for tidiness, would look harmless and would not compile through:
+`httpclient.Chain(resilience.Retry(p))` requires the argument to be
+assignable to `httpclient.Middleware`, and Go does not assign one named type
+to another merely because their underlying types match — two named types
+with identical underlying types are still different types, full stop. An
+*unnamed* func type carries no such restriction: it is assignable to any
+named type sharing its underlying type, which is exactly the property
+`resilience` needs and a same-shaped named type would throw away. So `Retry`
+and `Timeout` return the bare `func(http.RoundTripper) http.RoundTripper`,
+never a named type of their own — and that is the general rule for this
+case: a module shipping middleware for a type it does not own returns the
+bare func type, precisely so neither module has to import the other.
 
 ## 3. Dead code: when to delete a clause and when to keep and test it
 

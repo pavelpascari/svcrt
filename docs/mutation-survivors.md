@@ -10,12 +10,14 @@ fix wave; if they do not match what you see, re-derive them with
 mutant against its `.original`. Match entries by the **code they mutate**,
 which is quoted in every section, not by the id alone.
 
-`contract`, `httpserver`, and `examples/orders` all score 1.000 with no
-survivors and no wiring caveat recorded here, so none has an entry --
-`httpserver`'s caveat is written up in the **1.000 is not "everything is
-covered"** paragraph instead, because it is the example the rule is built on.
-`httpclient` also scores 1.000 with no survivors and *does* have an entry,
-under the exception above.
+`contract` and `httpserver` both score 1.000 with no survivors and no wiring
+caveat recorded here, so neither has an entry -- `httpserver`'s caveat is
+written up in the **1.000 is not "everything is covered"** paragraph
+instead, because it is the example the rule is built on. `httpclient` also
+scores 1.000 with no survivors and *does* have an entry, under the exception
+above. `examples/orders` scored 1.000 through R2 but no longer does, once
+`resilience.Retry` gave it a retry-policy literal to mutate in R3; see its
+own section below.
 
 **1.000 is not "everything is covered."** go-mutesting does not mutate
 struct-literal field assignments, so a whole class of wiring bug is invisible
@@ -730,11 +732,16 @@ literal has no observer, not merely one the current tests happen to miss.
 
 ## `resilience` Module
 
-**Mutation Score: above threshold, with 5 surviving mutants -- all 5 verified
-equivalent, justified below.** As of the Task 4 fix wave (Retry-After and
-Timeout) those are `backoff.go.11`, `retryafter.go.1`, `retryafter.go.4`,
+**Mutation Score: 0.938053 (106/113), with 100% statement coverage.** This
+is the current, post-correction score -- measured on `0dccfa1`, the commit
+that killed `backoff.go.10` and `backoff.go.17` (see the correction below),
+and re-confirmed since. Before that fix the module scored 0.920354
+(104/113); killing those two mutants is exactly what moved the kill count
+from 104 to 106, and that +2 is visible evidence the correction below was a
+real fix, not bookkeeping. The 5 that remain, all verified equivalent and
+justified below, are `backoff.go.11`, `retryafter.go.1`, `retryafter.go.4`,
 `retryafter.go.10` and `retryafter.go.24`. Run `./scripts/mutation.sh
-resilience` for the current score and mutant total.
+resilience` to reproduce.
 
 **Two mutants were initially misclassified as equivalent here and are not
 anymore: `backoff.go.10` and `backoff.go.17`.** See the correction below --
@@ -931,6 +938,61 @@ clamps to `0` and this mutant does not (`-1ns < -1ns` is false), returning
 to carry sub-second precision the header's whole-second HTTP-date format
 does not -- an ordinary "now vs. a parsed header" pair can only differ by a
 whole number of seconds and would never exercise this boundary at all.
+
+## `examples/orders` Module
+
+**Mutation Score: 0.968254 (61/63), with 2 surviving mutants -- both
+justified below as not economically killable, not as equivalent.** The drop
+from R2's 1.000 is not a regression in existing tests: R3's wiring of
+`resilience.Retry` into the pricing client (`c623990`/`3ab4a1f`/`52c4cf9`)
+added a retry-policy literal in `stack.go` that did not exist before, and it
+is that new code, not any previously-passing mutant, that go-mutesting can
+now mutate. Those are two ±1ms mutations of the pricing retry policy's
+backoff literal. Run `./scripts/mutation.sh examples/orders` for the current
+score and mutant total.
+
+The same run first turned up two other survivors that *were* killed rather
+than justified: `MaxAttempts: 3` surviving a mutation to `4` (the existing
+retries-then-succeeds acceptance test recovers on the third attempt, so a
+higher ceiling was never exercised -- fixed by
+`TestAcceptanceThePricingCallGivesUpAfterMaxAttempts`, an upstream that never
+recovers, asserting exactly 3 attempts), and `Constant(10 * time.Millisecond)`
+surviving a mutation to `Constant(10 / time.Millisecond)` (integer division
+to a zero backoff -- a real behaviour change, not equivalent -- fixed by
+`TestAcceptanceThePricingCallActuallyWaitsBetweenRetries`, which floors total
+elapsed time at 15ms across two real 10ms backoffs).
+
+### `stack.go`: the pricing retry policy's backoff literal, `Constant(10 * time.Millisecond)` (`10` -> `9` / `11`)
+
+```go
+resilience.Retry(resilience.Policy{
+	MaxAttempts: 3,
+	Backoff:     resilience.Constant(10 * time.Millisecond),
+}),
+```
+
+Mutants: change the literal to `9 * time.Millisecond` or
+`11 * time.Millisecond`.
+
+Both mutants were considered for a kill the same way the zero-backoff
+survivor above was (that one *was* killed, deliberately, rather than waved
+through as "obviously equivalent" -- this repo's own history has twice
+turned that judgement out to be wrong; see `resilience`'s backoff correction
+above). The two are a different case: unlike a zero backoff, a ±1ms shift is
+observable only by measuring wall-clock time across two backoffs -- 18ms,
+20ms, or 22ms total -- and every floor loose enough to avoid flaking against
+normal goroutine-scheduling and loopback-HTTP jitter on a shared CI machine
+is also loose enough to pass all three values. Killing them would need a
+window on the order of single-digit milliseconds, tighter than the jitter
+this repo already treats as untestable elsewhere (`lifecycle_test.go`'s
+100ms-order margins). `10 * time.Millisecond` itself is not a documented
+contract value -- the wiring's own comment calls it "short enough to keep
+the acceptance suite fast" -- so pinning its exact digit at the cost of a
+flaky suite buys nothing a reader depends on. Not recorded as equivalent: recorded, per this file's own preamble, as a
+survivor left un-killed for cost (flakiness), not for lack of a
+distinguishing input -- the same distinction `docs/conventions.md` §3 draws
+between deleting an inert clause and keeping one whose difference a caller
+can observe, applied here to a test rather than to production code.
 
 ## `httpclient` Module
 

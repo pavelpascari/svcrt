@@ -278,16 +278,21 @@ func TestAcceptanceTheStackCallsPricingThroughTheClient(t *testing.T) {
 	// Pin WHICH client the stack built. Replacing httpclient.New(...) with
 	// &http.Client{} satisfies every assertion above -- while using
 	// http.DefaultTransport, the one thing httpclient exists to avoid. That
-	// mutant survived the whole suite at the R2 review. MaxIdleConnsPerHost
-	// is httpclient.New's headline deviation and both http.Transport and
-	// http.DefaultTransport leave it zero, so it identifies the constructor
-	// without the test having to reach for one.
-	tr, ok := s.pricing.http.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("pricing client transport is %T; the stack must build it with httpclient.New, not a bare &http.Client{} on http.DefaultTransport", s.pricing.http.Transport)
-	}
-	if tr.MaxIdleConnsPerHost != 100 {
-		t.Errorf("pricing transport MaxIdleConnsPerHost = %d, want 100; the stack must build the client with httpclient.New", tr.MaxIdleConnsPerHost)
+	// mutant survived the whole suite at the R2 review.
+	//
+	// Since Task 5 wired resilience.Retry through Options.Middleware, the
+	// transport httpclient.New returns is no longer the raw *http.Transport
+	// -- httpclient's own TestMiddlewareWrapsTheTransport documents the same
+	// shape -- so asserting the concrete type IS *http.Transport now catches
+	// the &http.Client{} mutant (http.DefaultTransport is one) as well as a
+	// buildStack that dropped Options.Middleware entirely.
+	switch tr := s.pricing.http.Transport.(type) {
+	case nil:
+		t.Fatal("pricing client transport is nil; the stack must build it with httpclient.New, not a bare &http.Client{}")
+	case *http.Transport:
+		t.Fatal("pricing client transport is the raw *http.Transport; the stack must set httpclient.Options.Middleware so the pricing call retries")
+	default:
+		_ = tr
 	}
 }
 
@@ -382,5 +387,114 @@ func TestAcceptanceShutdownActuallyClosesThePricingConnection(t *testing.T) {
 	defer mu.Unlock()
 	if !closed {
 		t.Error("shutdown did not close the pricing client's pooled connection")
+	}
+}
+
+func TestAcceptanceThePricingCallRetriesATransientFailure(t *testing.T) {
+	var attempts atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, "upstream is warming up")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"amount_minor":1250}`)
+	}))
+	defer upstream.Close()
+
+	s := newStack(t, 0, upstream.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.lc.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	amount, err := s.pricing.Quote(context.Background(), "SKU-1")
+	if err != nil {
+		t.Fatalf("Quote: %v", err)
+	}
+	if amount != 1250 {
+		t.Errorf("amount = %d, want 1250", amount)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Errorf("upstream saw %d attempts, want 3 (two failures then a success)", got)
+	}
+}
+
+// TestAcceptanceThePricingCallGivesUpAfterMaxAttempts pins the policy's
+// MaxAttempts, not just that retry happens at all. The test above still
+// passes with MaxAttempts raised to 4 or more, since the upstream there
+// recovers on the third try and nothing after that is ever attempted -- a
+// mutation.sh run against the committed wiring found MaxAttempts: 3 -> 4
+// surviving for exactly that reason. Here the upstream never recovers, so
+// the exact number of attempts is the only thing that can distinguish the
+// policy's ceiling from a higher one.
+func TestAcceptanceThePricingCallGivesUpAfterMaxAttempts(t *testing.T) {
+	var attempts atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, "upstream never recovers")
+	}))
+	defer upstream.Close()
+
+	s := newStack(t, 0, upstream.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.lc.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	if _, err := s.pricing.Quote(context.Background(), "SKU-1"); err == nil {
+		t.Fatal("Quote succeeded against an upstream that always returns 503")
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Errorf("upstream saw %d attempts, want exactly 3 (MaxAttempts)", got)
+	}
+}
+
+// TestAcceptanceThePricingCallActuallyWaitsBetweenRetries pins that the
+// wiring's Backoff constant is genuinely wired in, not merely present in the
+// literal. go-mutesting found resilience.Constant(10 * time.Millisecond) ->
+// resilience.Constant(10 / time.Millisecond) surviving the whole suite:
+// integer division rounds that to a Backoff that always returns 0, so
+// retries fire back-to-back with no delay at all, and no other acceptance
+// test observes elapsed time.
+//
+// The two retries this scenario forces put a floor under the total time: at
+// the policy's 10ms constant, two backoffs alone take >= 20ms, before any
+// network round trip is added. 15ms leaves a comfortable margin under that
+// for scheduler jitter while staying far above what a zero-backoff mutant
+// produces -- three loopback HTTP round trips with no sleep at all finish in
+// low single-digit milliseconds.
+func TestAcceptanceThePricingCallActuallyWaitsBetweenRetries(t *testing.T) {
+	var attempts atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, "upstream is warming up")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"amount_minor":1250}`)
+	}))
+	defer upstream.Close()
+
+	s := newStack(t, 0, upstream.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.lc.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	start := time.Now()
+	if _, err := s.pricing.Quote(context.Background(), "SKU-1"); err != nil {
+		t.Fatalf("Quote: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	if elapsed < 15*time.Millisecond {
+		t.Errorf("elapsed = %v, want >= 15ms; two 10ms backoffs must actually happen between retries", elapsed)
 	}
 }
