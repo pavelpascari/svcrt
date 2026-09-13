@@ -732,19 +732,41 @@ literal has no observer, not merely one the current tests happen to miss.
 
 ## `resilience` Module
 
-**Mutation Score: 0.938053 (106/113), with 100% statement coverage.** This
-is the current, post-correction score -- measured on `0dccfa1`, the commit
-that killed `backoff.go.10` and `backoff.go.17` (see the correction below),
-and re-confirmed since. Before that fix the module scored 0.920354
-(104/113); killing those two mutants is exactly what moved the kill count
-from 104 to 106, and that +2 is visible evidence the correction below was a
-real fix, not bookkeeping. The 5 that remain, all verified equivalent and
-justified below, are `backoff.go.11`, `retryafter.go.1`, `retryafter.go.4`,
-`retryafter.go.10` and `retryafter.go.24`. Run `./scripts/mutation.sh
-resilience` to reproduce.
+**Mutation Score: 0.943548 (117 passed, 7 failed, total 124), with 100%
+statement coverage.** Measured at the R3 final-review fix wave by running
+`./scripts/mutation.sh resilience`, which printed exactly that line; the
+seven survivors were enumerated from the same worktree with
+`go-mutesting ./...` and each diffed against its `.original`. That is the
+whole provenance -- this file's value is that its provenance statements are
+literally true, so a score here is either a run someone did and recorded, or
+it does not belong.
+
+The previous figure, 0.938053 (106 passed, 7 failed, total 113), was
+measured on `0dccfa1`, the commit that killed the two saturation mutants
+the correction below describes; before that fix the module scored 0.920354
+(104/113), and that +2 is visible evidence the correction was a real fix
+rather than bookkeeping. The mutant total moved 113 -> 124 because the fix
+wave added source: `maxRetryAfter` and its comparison, `Policy.retryable`,
+and `slices.Clone` on `RetryMethods`. Every mutant of that new code is
+killed.
+
+That paragraph also used to say "the 5 that remain", while the same run
+reported 7 failures. Two `Jitter` survivors were simply missing from the
+list -- an arithmetic claim contradicted by the numbers printed beside it,
+in the file whose whole job is provenance. Both are written up below now.
+The seven, all verified equivalent and justified below, are `backoff.go.9`
+(the `Exponential` final clamp), `backoff.go.10` and `backoff.go.15`
+(`Jitter`'s non-positive guard), and `retryafter.go.1`, `retryafter.go.4`,
+`retryafter.go.10` and `retryafter.go.24`. The ids are from the run recorded
+above; match by the quoted code, not the number, per this file's preamble --
+this wave's edits to `retry.go` renumbered `backoff.go`'s mutants even
+though `backoff.go` itself did not change.
 
 **Two mutants were initially misclassified as equivalent here and are not
-anymore: `backoff.go.10` and `backoff.go.17`.** See the correction below --
+anymore: `backoff.go.10` and `backoff.go.17` as numbered by the Task 4 run**
+(under the current numbering they no longer exist as survivors at all, and
+`backoff.go.10` now names an unrelated `Jitter` mutant -- read the code, not
+the id). See the correction below --
 they are real, non-equivalent mutants killed by
 `TestExponentialSaturationAtExactlyHalfAnOddMaxStillReturnsMax`, kept in this
 file as a record of the wrong argument and why it was wrong, per this file's
@@ -794,7 +816,8 @@ return d
 ```
 
 Mutants: `backoff.go.10` (`>=` -> `>`) and `backoff.go.17` (divisor `2` ->
-`1`, i.e. the threshold becomes `max` instead of `max/2`) were originally
+`1`, i.e. the threshold becomes `max` instead of `max/2`), as numbered by
+the Task 4 run, were originally
 recorded here as equivalent. **That was wrong**, caught by review, and is
 recorded rather than silently deleted -- this file's own preamble says an
 equivalence proof is a reason to look harder, not a reason to stop, and that
@@ -843,7 +866,8 @@ if d > max {
 return d
 ```
 
-Mutant `backoff.go.11` changes `>` to `>=`.
+Mutant `backoff.go.9` changes `>` to `>=` (`backoff.go.11` under the Task 4
+numbering).
 
 The two branches return different *expressions* (`max` the parameter vs. `d`
 the local) but only when `d == max` do they disagree on which branch runs --
@@ -851,6 +875,38 @@ and at that exact point the expressions are equal in value. `d > max` is
 false and `d >= max` is true only when `d == max`, and `return d` at that
 point returns the same `time.Duration` value as `return max`. No input
 distinguishes the two programs' output, only which line produced it.
+
+### `backoff.go`: `Jitter`'s non-positive guard, `if d <= 0` (`<` boundary and threshold)
+
+```go
+d := b(attempt)
+if d <= 0 {
+	return 0
+}
+return time.Duration(rand.N(int64(d) + 1))
+```
+
+Mutants: `backoff.go.10` changes `d <= 0` to `d < 0`; `backoff.go.15`
+changes it to `d <= -1`.
+
+Both mutants clamp a *subset* of what the original clamps -- they stop
+guarding at exactly `d == 0` -- and at that one value the guarded and
+unguarded paths return the same thing. With `d == 0` the mutants fall
+through to `rand.N(int64(0) + 1)`, i.e. `rand.N(1)`, which draws uniformly
+from `[0, 1)` and so returns `0` on every draw, deterministically. That is
+the same `time.Duration(0)` the guard returns.
+
+The two mutants are also identical to each other: `time.Duration` is an
+integer type, so `d < 0` and `d <= -1` describe the same set of values, with
+nothing between `-1` and `0` for the shifted threshold to catch. No input
+distinguishes either program's output from the original's, only which line
+produced it.
+
+The guard is kept rather than deleted (`docs/conventions.md` §3) because it
+is not inert in the sense that section means: it is what makes the `d <= 0`
+case free and obvious instead of resting on `rand.N(1)` happening to be
+degenerate, and a future change to the draw -- `rand.N(int64(d))` guarded
+against a panic on `0`, say -- would make it load-bearing again.
 
 ### `retryafter.go`: nil-response branch, `return 0, false` -> `return -1, false` / `return 1, false`
 
