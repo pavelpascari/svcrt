@@ -1,25 +1,18 @@
 // Package logging provides a slog.Handler that enriches records from their
-// context, plus the attribute-key conventions svcrt services share.
+// context.
 //
 // It is not a logging framework and not a wrapper: the logger it returns is a
 // plain *slog.Logger, and everything it produces is ordinary slog output.
+//
+// It defines no attribute keys. A key belongs to whichever module emits the
+// attribute -- httpserver names the access-log keys, contract names the error
+// code, telemetry names the trace ids -- and this package never learns what
+// any of them mean. That is the same separation the Extractor seam exists for.
 package logging
 
 import (
 	"io"
 	"log/slog"
-)
-
-// Well-known attribute keys.
-//
-// Log output is consumed by a node agent with a schema contract, so these
-// names are part of the interface rather than free-form text (12-factor XI,
-// amended).
-const (
-	KeyMethod = "method"
-	KeyRoute  = "route"
-	KeyStatus = "status"
-	KeyDurMS  = "duration_ms"
 )
 
 // Options configures the logger returned by New.

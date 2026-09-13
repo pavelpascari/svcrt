@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/pavelpascari/svcrt/contract"
+	"github.com/pavelpascari/svcrt/httpserver"
 	"github.com/pavelpascari/svcrt/logging"
 )
 
@@ -183,11 +184,11 @@ func TestAcceptanceLogLineCarriesRouteAndStatus(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(logs())), &line); err != nil {
 		t.Fatalf("decode log %q: %v", logs(), err)
 	}
-	if line[logging.KeyRoute] != "GET /orders/{id}" {
-		t.Errorf("%s = %v, want the route pattern", logging.KeyRoute, line[logging.KeyRoute])
+	if line[httpserver.KeyRoute] != "GET /orders/{id}" {
+		t.Errorf("%s = %v, want the route pattern", httpserver.KeyRoute, line[httpserver.KeyRoute])
 	}
-	if line[logging.KeyStatus] != float64(200) {
-		t.Errorf("%s = %v, want 200", logging.KeyStatus, line[logging.KeyStatus])
+	if line[httpserver.KeyStatus] != float64(200) {
+		t.Errorf("%s = %v, want 200", httpserver.KeyStatus, line[httpserver.KeyStatus])
 	}
 }
 

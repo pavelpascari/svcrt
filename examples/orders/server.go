@@ -7,7 +7,7 @@ import (
 	"net/http"
 
 	"github.com/pavelpascari/svcrt/contract"
-	"github.com/pavelpascari/svcrt/logging"
+	"github.com/pavelpascari/svcrt/httpserver"
 )
 
 // statusFor maps an error code to an HTTP status.
@@ -97,5 +97,5 @@ func newServer(svc *Service, log *slog.Logger) http.Handler {
 		writeJSON(w, http.StatusOK, order)
 	})
 
-	return logging.Middleware(log)(mux)
+	return httpserver.AccessLog(log)(mux)
 }

@@ -6,8 +6,8 @@ import "net/http"
 //
 // Note the deliberate spelling difference across this project, recorded in
 // docs/conventions.md: contract.Middleware is a generic call-level type,
-// logging.Middleware is a constructor returning one of these, and this is the
-// plain transport-level type they both describe.
+// httpserver.Middleware (this one) wraps an http.Handler, and
+// httpclient.Middleware wraps an http.RoundTripper.
 type Middleware func(http.Handler) http.Handler
 
 // Chain folds ms into one Middleware. The first argument ends up outermost,

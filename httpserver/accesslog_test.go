@@ -1,4 +1,4 @@
-package logging_test
+package httpserver_test
 
 import (
 	"bytes"
@@ -8,15 +8,15 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/pavelpascari/svcrt/logging"
+	"github.com/pavelpascari/svcrt/httpserver"
 )
 
 func captureServe(t *testing.T, mux http.Handler, req *http.Request) (*httptest.ResponseRecorder, map[string]any) {
 	t.Helper()
 
 	var buf bytes.Buffer
-	log := logging.New(&buf, logging.Options{Level: slog.LevelDebug})
-	h := logging.Middleware(log)(mux)
+	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	h := httpserver.AccessLog(log)(mux)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -41,17 +41,17 @@ func TestMiddlewareLogsRoutePatternNotPath(t *testing.T) {
 
 	_, line := captureServe(t, mux, httptest.NewRequest("GET", "/orders/8a3f-not-a-route", nil))
 
-	if line[logging.KeyRoute] != "GET /orders/{id}" {
-		t.Errorf("%s = %v, want the pattern", logging.KeyRoute, line[logging.KeyRoute])
+	if line[httpserver.KeyRoute] != "GET /orders/{id}" {
+		t.Errorf("%s = %v, want the pattern", httpserver.KeyRoute, line[httpserver.KeyRoute])
 	}
-	if line[logging.KeyMethod] != "GET" {
-		t.Errorf("%s = %v, want GET", logging.KeyMethod, line[logging.KeyMethod])
+	if line[httpserver.KeyMethod] != "GET" {
+		t.Errorf("%s = %v, want GET", httpserver.KeyMethod, line[httpserver.KeyMethod])
 	}
-	if line[logging.KeyStatus] != float64(200) {
-		t.Errorf("%s = %v, want 200", logging.KeyStatus, line[logging.KeyStatus])
+	if line[httpserver.KeyStatus] != float64(200) {
+		t.Errorf("%s = %v, want 200", httpserver.KeyStatus, line[httpserver.KeyStatus])
 	}
-	if _, ok := line[logging.KeyDurMS]; !ok {
-		t.Errorf("%s missing from %v", logging.KeyDurMS, line)
+	if _, ok := line[httpserver.KeyDurMS]; !ok {
+		t.Errorf("%s missing from %v", httpserver.KeyDurMS, line)
 	}
 }
 
@@ -65,16 +65,16 @@ func TestMiddlewareOmitsRouteWhenNoPatternMatched(t *testing.T) {
 
 	_, line := captureServe(t, mux, httptest.NewRequest("GET", "/no-such-route-8a3f", nil))
 
-	if v, ok := line[logging.KeyRoute]; ok {
-		t.Errorf("%s = %v, want it omitted on an unmatched request", logging.KeyRoute, v)
+	if v, ok := line[httpserver.KeyRoute]; ok {
+		t.Errorf("%s = %v, want it omitted on an unmatched request", httpserver.KeyRoute, v)
 	}
 	for k, v := range line {
 		if s, isStr := v.(string); isStr && s == "/no-such-route-8a3f" {
 			t.Errorf("raw path leaked into key %q", k)
 		}
 	}
-	if line[logging.KeyStatus] != float64(404) {
-		t.Errorf("%s = %v, want 404", logging.KeyStatus, line[logging.KeyStatus])
+	if line[httpserver.KeyStatus] != float64(404) {
+		t.Errorf("%s = %v, want 404", httpserver.KeyStatus, line[httpserver.KeyStatus])
 	}
 }
 
@@ -91,8 +91,8 @@ func TestMiddlewareRecordsExplicitStatus(t *testing.T) {
 	if rec.Code != http.StatusTeapot {
 		t.Errorf("recorder code = %d, want 418", rec.Code)
 	}
-	if line[logging.KeyStatus] != float64(418) {
-		t.Errorf("%s = %v, want 418", logging.KeyStatus, line[logging.KeyStatus])
+	if line[httpserver.KeyStatus] != float64(418) {
+		t.Errorf("%s = %v, want 418", httpserver.KeyStatus, line[httpserver.KeyStatus])
 	}
 }
 
@@ -106,8 +106,8 @@ func TestMiddlewareDefaultsToStatus200OnImplicitWrite(t *testing.T) {
 
 	_, line := captureServe(t, mux, httptest.NewRequest("GET", "/x", nil))
 
-	if line[logging.KeyStatus] != float64(200) {
-		t.Errorf("%s = %v, want 200", logging.KeyStatus, line[logging.KeyStatus])
+	if line[httpserver.KeyStatus] != float64(200) {
+		t.Errorf("%s = %v, want 200", httpserver.KeyStatus, line[httpserver.KeyStatus])
 	}
 }
 
@@ -128,8 +128,8 @@ func TestMiddlewareIgnoresWriteHeaderAfterImplicitWrite(t *testing.T) {
 
 	_, line := captureServe(t, mux, httptest.NewRequest("GET", "/x", nil))
 
-	if line[logging.KeyStatus] != float64(200) {
-		t.Errorf("%s = %v, want 200 (superfluous WriteHeader must not overwrite it)", logging.KeyStatus, line[logging.KeyStatus])
+	if line[httpserver.KeyStatus] != float64(200) {
+		t.Errorf("%s = %v, want 200 (superfluous WriteHeader must not overwrite it)", httpserver.KeyStatus, line[httpserver.KeyStatus])
 	}
 }
 
@@ -174,13 +174,13 @@ func TestMiddlewareLogsWhenTheHandlerPanics(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	log := logging.New(&buf, logging.Options{Level: slog.LevelDebug})
+	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /boom", func(w http.ResponseWriter, r *http.Request) {
 		panic("kaboom")
 	})
-	h := logging.Middleware(log)(mux)
+	h := httpserver.AccessLog(log)(mux)
 
 	var recovered any
 	func() {
@@ -201,17 +201,17 @@ func TestMiddlewareLogsWhenTheHandlerPanics(t *testing.T) {
 	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &line); err != nil {
 		t.Fatalf("decode log line %q: %v", buf.String(), err)
 	}
-	if line[logging.KeyRoute] != "GET /boom" {
-		t.Errorf("%s = %v, want %q", logging.KeyRoute, line[logging.KeyRoute], "GET /boom")
+	if line[httpserver.KeyRoute] != "GET /boom" {
+		t.Errorf("%s = %v, want %q", httpserver.KeyRoute, line[httpserver.KeyRoute], "GET /boom")
 	}
-	if line[logging.KeyMethod] != "GET" {
-		t.Errorf("%s = %v, want GET", logging.KeyMethod, line[logging.KeyMethod])
+	if line[httpserver.KeyMethod] != "GET" {
+		t.Errorf("%s = %v, want GET", httpserver.KeyMethod, line[httpserver.KeyMethod])
 	}
 	// Nothing wrote a header, and net/http sends no response at all on a
 	// panic, so the constructor's optimistic 200 default never happened.
 	// Reporting it -- or inventing a 500 -- would send an on-call engineer
 	// chasing the wrong thing. The status attribute must be absent.
-	if _, ok := line[logging.KeyStatus]; ok {
-		t.Errorf("%s = %v, want absent (nothing was written)", logging.KeyStatus, line[logging.KeyStatus])
+	if _, ok := line[httpserver.KeyStatus]; ok {
+		t.Errorf("%s = %v, want absent (nothing was written)", httpserver.KeyStatus, line[httpserver.KeyStatus])
 	}
 }
