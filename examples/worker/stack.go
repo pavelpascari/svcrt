@@ -36,12 +36,17 @@ type workerStackConfig struct {
 // is the seam that makes the drain and dependency-order behavior observable
 // from a test rather than only from a running binary.
 //
-// The returned stack comes up ready: Started, Live, and Ready are all set
-// true before this function returns, unconditionally, for both callers. That
-// flag-setting used to live in main as three lines a future edit could
-// silently drop -- a dropped Set(true) fails with no crash and no log line,
-// only every readiness probe returning 503 forever. Moving it here removes
-// the line from main that could be forgotten.
+// The returned stack is NOT yet ready: Started and Ready open when Run has
+// finished starting every component, via the OnStarted hook below. Live is
+// already open, because NewHealth opens it -- a liveness gate that waits for
+// boot restarts a slow-starting process.
+//
+// Those gates used to be three Set(true) calls at the end of this function,
+// which was easy to drop silently -- unlike a missing OnDrain, a missing
+// Set(true) fails with no crash and no log line, only every readiness probe
+// returning 503 forever. Handing both edges to the lifecycle puts them next
+// to each other and lets the thing that did the starting decide when
+// starting is done.
 func buildWorkerStack(cfg workerStackConfig) *workerStack {
 	trace := cfg.Trace
 	if trace == nil {
@@ -51,8 +56,10 @@ func buildWorkerStack(cfg workerStackConfig) *workerStack {
 	health := httpserver.NewHealth()
 	lc := lifecycle.New(lifecycle.Config{DrainDelay: cfg.DrainDelay, Logger: cfg.Logger})
 
-	// The whole health/lifecycle seam, in one visible line. Neither module
-	// imports the other; the coupling lives here, in your code.
+	// The whole health/lifecycle seam, in two visible lines. Neither module
+	// imports the other; the coupling lives here, in your code, as a pair of
+	// method values.
+	lc.OnStarted(health.Up)
 	lc.OnDrain(health.Drain)
 
 	c := NewConsumer()
@@ -70,10 +77,6 @@ func buildWorkerStack(cfg workerStackConfig) *workerStack {
 		func(ctx context.Context) error { trace("start:admin"); return admin.Start(ctx) },
 		func(ctx context.Context) error { trace("stop:admin"); return admin.Shutdown(ctx) },
 		lifecycle.After(queue))
-
-	health.Started.Set(true)
-	health.Live.Set(true)
-	health.Ready.Set(true)
 
 	return &workerStack{lc: lc, health: health, admin: admin, consumer: c}
 }

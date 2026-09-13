@@ -60,7 +60,8 @@ type Lifecycle struct {
 	comps []component
 	errs  []error // construction errors, reported by Run
 
-	drainHooks []func()
+	startedHooks []func()
+	drainHooks   []func()
 
 	fatalOnce sync.Once
 	fatalCh   chan struct{}
@@ -105,6 +106,16 @@ func (l *Lifecycle) Add(name string, start StartFunc, stop StopFunc, opts ...Opt
 	return Ref{owner: l, i: len(l.comps) - 1}
 }
 
+// OnStarted registers a hook run once, after every component has started and
+// before Run begins waiting for shutdown. A startup that fails never runs them.
+//
+// This is the up-edge of the pair OnDrain completes, and the reason it exists
+// on Lifecycle rather than in your wiring: Lifecycle is the only thing that
+// knows when the last component finished starting. Opening a readiness gate by
+// hand at construction time instead means answering 200 while a later
+// component is still binding its listener.
+func (l *Lifecycle) OnStarted(f func()) { l.startedHooks = append(l.startedHooks, f) }
+
 // OnDrain registers a hook run once, before any component is stopped.
 func (l *Lifecycle) OnDrain(f func()) { l.drainHooks = append(l.drainHooks, f) }
 
@@ -132,6 +143,13 @@ func (l *Lifecycle) Run(ctx context.Context) error {
 			stopErr := l.stopStarted(ctx, lv, started)
 			return errors.Join(err, stopErr)
 		}
+	}
+
+	// Every component is up. Run the hooks here, after the last level and
+	// before the wait below: this is the only instant at which "the service
+	// has started" is true and nothing has begun stopping yet.
+	for _, h := range l.startedHooks {
+		h()
 	}
 
 	// fatalErr is an atomic.Pointer, not a plain error read after the

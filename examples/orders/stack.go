@@ -45,16 +45,25 @@ type appStackConfig struct {
 // seam that makes the drain behavior observable from a test rather than only
 // from a running binary.
 //
-// The returned stack comes up ready: Started, Live, and Ready are all set
-// true before this function returns, unconditionally, for both callers.
-// That flag-setting used to live in main as three lines a future edit could
-// silently drop -- unlike OnDrain or DrainDelay, a dropped Set(true) fails
-// with no crash and no log line, only every readiness probe returning 503
-// forever, which surfaces as a stalled rollout rather than an error anyone
-// sees. Moving it here removes the line from main that could be forgotten.
-// A service that genuinely needs to warm up before accepting traffic calls
-// health.Ready.Set(false) right after buildStack returns -- one explicit
-// line undoing the default, not three omitted ones creating a silent gap.
+// The returned stack is NOT yet ready: Started and Ready open when Run has
+// finished starting every component, via the OnStarted hook below. Live is
+// already open, because NewHealth opens it -- a liveness gate that waits for
+// boot restarts a slow-starting process.
+//
+// Those gates used to be three Set(true) calls at the end of this function,
+// which was both easy to drop silently and wrong about time. Wrong about
+// time because api and admin are the same level and start concurrently, so
+// the gates were already open while api was still binding: /readyz could
+// answer 200 for a service that could not yet serve. Easy to drop because
+// unlike a missing OnDrain, a missing Set(true) fails with no crash and no
+// log line -- just every readiness probe returning 503 forever, surfacing as
+// a stalled rollout rather than an error anyone sees.
+//
+// Handing both edges to the lifecycle fixes both problems at once: the hooks
+// are registered next to each other, and the only thing that knows when
+// startup actually finished is the thing that did the starting. A service
+// that must warm up before accepting traffic adds its own OnStarted hook
+// after this one, or registers the warm-up as a component.
 func buildStack(cfg appStackConfig) *appStack {
 	trace := cfg.Trace
 	if trace == nil {
@@ -64,8 +73,10 @@ func buildStack(cfg appStackConfig) *appStack {
 	health := httpserver.NewHealth()
 	lc := lifecycle.New(lifecycle.Config{DrainDelay: cfg.DrainDelay, Logger: cfg.Logger})
 
-	// The whole health/lifecycle seam, in one visible line. Neither module
-	// imports the other; the coupling lives here, in your code.
+	// The whole health/lifecycle seam, in two visible lines. Neither module
+	// imports the other; the coupling lives here, in your code, as a pair of
+	// method values.
+	lc.OnStarted(health.Up)
 	lc.OnDrain(health.Drain)
 
 	store := lc.Add("store",
@@ -87,10 +98,6 @@ func buildStack(cfg appStackConfig) *appStack {
 		func(ctx context.Context) error { trace("start:admin"); return admin.Start(ctx) },
 		func(ctx context.Context) error { trace("stop:admin"); return admin.Shutdown(ctx) },
 		lifecycle.After(store))
-
-	health.Started.Set(true)
-	health.Live.Set(true)
-	health.Ready.Set(true)
 
 	return &appStack{lc: lc, health: health, api: api, admin: admin}
 }

@@ -98,9 +98,22 @@ type Health struct {
 	Ready   *Gate
 }
 
-// NewHealth returns a Health with all three gates closed.
+// NewHealth returns a Health with Started and Ready closed and Live already
+// open.
+//
+// Live is the odd one out on purpose. A failing liveness probe asks the
+// orchestrator to RESTART the process, so a Live that stays closed until boot
+// finishes turns a slow start into a restart loop — the process is killed for
+// not having finished starting, then killed again, forever. That is the exact
+// failure a startupProbe exists to prevent, and Started is the gate that
+// answers it. Live claims only that the process is not wedged, which is true
+// from the moment it can answer a request at all.
+//
+// Started and Ready are opened by Up once the service has actually started.
 func NewHealth() *Health {
-	return &Health{Started: &Gate{}, Live: &Gate{}, Ready: &Gate{}}
+	h := &Health{Started: &Gate{}, Live: &Gate{}, Ready: &Gate{}}
+	h.Live.Set(true)
+	return h
 }
 
 // AddReadyCheck registers a dependency check on the READINESS gate.
@@ -122,6 +135,23 @@ func (h *Health) AddReadyCheck(name string, fn func(context.Context) error) {
 	h.Ready.mu.Lock()
 	defer h.Ready.mu.Unlock()
 	h.Ready.checks = append(h.Ready.checks, readyCheck{name: name, fn: fn})
+}
+
+// Up opens the startup and readiness gates. It is the hook to register with a
+// lifecycle's OnStarted, as a method value:
+//
+//	lc.OnStarted(h.Up)
+//
+// Registering it there rather than calling it at construction time is what
+// makes readiness honest: the gates open when the last component has finished
+// starting, not before the first one has. Opened by hand while wiring, they
+// answer 200 during startup, so a probe can see a service ready while a
+// listener it depends on is still binding.
+//
+// Live is untouched because NewHealth already opened it; see there for why.
+func (h *Health) Up() {
+	h.Started.Set(true)
+	h.Ready.Set(true)
 }
 
 // Drain closes the readiness gate. It is the hook to register with a

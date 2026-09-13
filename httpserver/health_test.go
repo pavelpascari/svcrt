@@ -22,15 +22,63 @@ func probe(t *testing.T, h http.Handler) (int, string) {
 	return rec.Code, rec.Body.String()
 }
 
-func TestGatesStartClosed(t *testing.T) {
+func TestStartedAndReadyStartClosed(t *testing.T) {
 	t.Parallel()
 	h := httpserver.NewHealth()
 	for name, g := range map[string]*httpserver.Gate{
-		"Started": h.Started, "Live": h.Live, "Ready": h.Ready,
+		"Started": h.Started, "Ready": h.Ready,
 	} {
 		if code, _ := probe(t, g); code != http.StatusServiceUnavailable {
-			t.Errorf("%s before Set(true) = %d, want 503", name, code)
+			t.Errorf("%s before Up = %d, want 503", name, code)
 		}
+	}
+}
+
+// Live starts OPEN, unlike the other two, and the asymmetry is the point.
+// Liveness failing asks the orchestrator to RESTART the process, so a gate
+// that stays closed until boot finishes turns a slow start into a restart
+// loop -- the exact failure a startupProbe exists to prevent. The process is
+// alive from the moment it can answer at all; that is all Live claims.
+func TestLiveStartsOpen(t *testing.T) {
+	t.Parallel()
+	h := httpserver.NewHealth()
+	if code, _ := probe(t, h.Live); code != http.StatusOK {
+		t.Errorf("Live before Up = %d, want 200 (a closed Live restarts a slow-starting process)", code)
+	}
+}
+
+func TestUpOpensStartedAndReady(t *testing.T) {
+	t.Parallel()
+	h := httpserver.NewHealth()
+	h.Up()
+	for name, g := range map[string]*httpserver.Gate{
+		"Started": h.Started, "Live": h.Live, "Ready": h.Ready,
+	} {
+		if code, _ := probe(t, g); code != http.StatusOK {
+			t.Errorf("%s after Up = %d, want 200", name, code)
+		}
+	}
+}
+
+// Up then Drain is the whole lifetime of a service in two calls. Started must
+// survive the drain: the service did boot, and reporting otherwise tells a
+// startupProbe that boot failed while the process is deliberately shutting
+// down. Live must survive for the same reason Drain already documents -- a
+// liveness failure mid-drain invites a restart of a process that is leaving.
+func TestDrainAfterUpClosesOnlyReady(t *testing.T) {
+	t.Parallel()
+	h := httpserver.NewHealth()
+	h.Up()
+	h.Drain()
+
+	if code, _ := probe(t, h.Ready); code != http.StatusServiceUnavailable {
+		t.Errorf("Ready after Drain = %d, want 503", code)
+	}
+	if code, _ := probe(t, h.Started); code != http.StatusOK {
+		t.Errorf("Started after Drain = %d, want 200 (the service did boot)", code)
+	}
+	if code, _ := probe(t, h.Live); code != http.StatusOK {
+		t.Errorf("Live after Drain = %d, want 200 (a draining process is not wedged)", code)
 	}
 }
 
