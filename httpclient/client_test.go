@@ -112,3 +112,22 @@ func TestMiddlewareWrapsTheTransport(t *testing.T) {
 		t.Errorf("c.Transport is %T, want httpclient.RoundTripperFunc", c.Transport)
 	}
 }
+
+func TestTransportHonoursTheProxyEnvironment(t *testing.T) {
+	// Not t.Parallel: t.Setenv forbids it.
+	t.Setenv("HTTP_PROXY", "http://egress.example:3128")
+
+	tr := transportOf(t, httpclient.New(httpclient.Options{}))
+	if tr.Proxy == nil {
+		t.Fatal("Proxy is nil; HTTP_PROXY/HTTPS_PROXY/NO_PROXY are ignored and egress-proxied networks break")
+	}
+
+	req, _ := http.NewRequest("GET", "http://upstream.example/x", nil)
+	u, err := tr.Proxy(req)
+	if err != nil {
+		t.Fatalf("Proxy: %v", err)
+	}
+	if u == nil || u.Host != "egress.example:3128" {
+		t.Errorf("Proxy resolved to %v, want http://egress.example:3128", u)
+	}
+}

@@ -8,9 +8,14 @@ import (
 
 // Defaults applied to a zero-valued Options field.
 //
-// Every value except the two noted below is http.DefaultTransport's own, read
+// Every value except the three noted below is http.DefaultTransport's own, read
 // off go1.25 rather than chosen, so that the only deviations are deliberate.
 const (
+	// Deviation 1. http.DefaultTransport uses 30s; we use 5s. A TCP connect
+	// needing more than 5s means SYN retransmits — the dependency is effectively
+	// down — so fail fast to free the goroutine and preserve the caller's
+	// remaining deadline budget. A caller wanting the stdlib value sets the
+	// Options field.
 	defaultDialTimeout           = 5 * time.Second
 	defaultTLSHandshakeTimeout   = 10 * time.Second
 	defaultIdleConnTimeout       = 90 * time.Second
@@ -18,12 +23,12 @@ const (
 	defaultKeepAlive             = 30 * time.Second
 	defaultMaxIdleConns          = 100
 
-	// Deviation 1. http.DefaultTransport leaves this zero, i.e. unbounded: a
+	// Deviation 2. http.DefaultTransport leaves this zero, i.e. unbounded: a
 	// server that accepts a connection and never sends headers hangs the
 	// caller until its context expires, and forever if it has no deadline.
 	defaultResponseHeaderTimeout = 10 * time.Second
 
-	// Deviation 2. http.Transport leaves this zero, which means the package
+	// Deviation 3. http.Transport leaves this zero, which means the package
 	// default of 2 -- and http.DefaultTransport leaves it zero as well, so the
 	// standard client has the same ceiling. Above that concurrency a service
 	// opens a fresh connection per request, pays TCP and TLS setup each time,
@@ -81,6 +86,14 @@ func New(opts Options) *http.Client {
 		// downgrade every caller to HTTP/1.1 -- no error, no log line.
 		// http.DefaultTransport sets it for the same reason.
 		ForceAttemptHTTP2: true,
+
+		// A fresh Transport has Proxy: nil, so HTTP_PROXY, HTTPS_PROXY, and
+		// NO_PROXY are ignored completely. In an egress-controlled network this
+		// silently bypasses a security control or breaks every request without
+		// error. This is the same silent loss as ForceAttemptHTTP2 above -- a
+		// fresh transport loses DefaultTransport's behaviour, here its proxy
+		// settings.
+		Proxy: http.ProxyFromEnvironment,
 
 		TLSHandshakeTimeout:   orDuration(opts.TLSHandshakeTimeout, defaultTLSHandshakeTimeout),
 		ResponseHeaderTimeout: orDuration(opts.ResponseHeaderTimeout, defaultResponseHeaderTimeout),
