@@ -4,5 +4,8 @@ use (
 	./contract
 	./config
 	./logging
+	./lifecycle
+	./httpserver
 	./examples/orders
+	./examples/worker
 )
