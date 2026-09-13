@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,10 +51,17 @@ func TestAppConfigRequiresDatabaseURL(t *testing.T) {
 	}
 }
 
+// openStore returns a Store already open, for tests that do not run a lifecycle.
+func openStore(orders map[string]*Order) *Store {
+	s := NewStore(orders)
+	_ = s.Open(context.Background())
+	return s
+}
+
 func TestServiceReturnsOrder(t *testing.T) {
 	t.Parallel()
 
-	svc := NewService(map[string]*Order{"1": {ID: "1", Qty: 3}})
+	svc := NewService(openStore(map[string]*Order{"1": {ID: "1", Qty: 3}}))
 
 	got, err := svc.GetOrder(context.Background(), GetOrderRequest{ID: "1"})
 	if err != nil {
@@ -67,7 +75,7 @@ func TestServiceReturnsOrder(t *testing.T) {
 func TestServiceReturnsCodedNotFound(t *testing.T) {
 	t.Parallel()
 
-	svc := NewService(nil)
+	svc := NewService(openStore(nil))
 
 	_, err := svc.GetOrder(context.Background(), GetOrderRequest{ID: "missing"})
 	if err == nil {
@@ -145,27 +153,91 @@ func TestIDTooLongErrorMessagePreservesArgumentOrder(t *testing.T) {
 	}
 }
 
-// NewService(nil) must substitute an empty map, not keep the nil. Reads from
-// a nil map are harmless, so this is invisible through GetOrder -- but a
-// write panics, and the guard exists for the moment this service grows one.
+// NewStore(nil) must substitute an empty map, not keep the nil. Reads from a
+// nil map are harmless, so this is invisible through Get -- but a write
+// panics, and the guard exists for the moment this store grows one.
 // Per this project's dead-code precedent: a clause whose difference some
 // caller can observe is kept and tested, not deleted.
-func TestNewServiceReplacesANilMap(t *testing.T) {
+func TestNewStoreReplacesANilMap(t *testing.T) {
 	t.Parallel()
 
-	svc := NewService(nil)
+	s := NewStore(nil)
 
-	if svc.orders == nil {
-		t.Fatal("NewService(nil) left the map nil")
+	if s.orders == nil {
+		t.Fatal("NewStore(nil) left the map nil")
 	}
 	// The observable consequence: this line panics on a nil map.
-	svc.orders["1"] = &Order{ID: "1", Qty: 1}
+	s.orders["1"] = &Order{ID: "1", Qty: 1}
+	_ = s.Open(context.Background())
 
-	got, err := svc.GetOrder(context.Background(), GetOrderRequest{ID: "1"})
-	if err != nil {
-		t.Fatalf("GetOrder after a write: %v", err)
+	got, ok := s.Get("1")
+	if !ok {
+		t.Fatal("Get(1) after a write reported not-found")
 	}
 	if got.Qty != 1 {
 		t.Errorf("Qty = %d, want 1", got.Qty)
 	}
+}
+
+// Store.Get reports not-found once the store is closed, so a request
+// arriving after shutdown cannot read stale data.
+func TestStoreGetReturnsNotFoundAfterClose(t *testing.T) {
+	t.Parallel()
+
+	s := openStore(map[string]*Order{"1": {ID: "1", Qty: 3}})
+
+	if _, ok := s.Get("1"); !ok {
+		t.Fatal("Get(1) reported not-found while the store is open")
+	}
+
+	if err := s.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if _, ok := s.Get("1"); ok {
+		t.Error("Get(1) succeeded after Close; want not-found")
+	}
+}
+
+// TestStoreGetIsSafeConcurrentlyWithClose pins the reason Store.open is
+// atomic. Get's doc promises a request arriving after shutdown reads no stale
+// data, which is a statement about Get and Close running at the same time --
+// and the exemplar is teaching material, so the code has to make that claim
+// true rather than rely on the dependency edge happening to serialize them.
+// It does not always: api is After(store), so api.Shutdown normally drains
+// before store.Close, but a Shutdown that returns on its deadline instead
+// (a handler slower than StopTimeout, or a hijacked connection) leaves Close
+// writing while Get reads. With a plain bool this fails under -race.
+//
+// The acceptance suites cannot catch this: they substitute their own
+// StoreOpen/StoreClose and never touch the real Store.
+func TestStoreGetIsSafeConcurrentlyWithClose(t *testing.T) {
+	t.Parallel()
+	st := NewStore(map[string]*Order{"1": {ID: "1", Qty: 3}})
+	if err := st.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			st.Get("1")
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			if err := st.Close(context.Background()); err != nil {
+				t.Error(err)
+				return
+			}
+			if err := st.Open(context.Background()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
 }

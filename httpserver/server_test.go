@@ -1,0 +1,379 @@
+package httpserver_test
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/pavelpascari/svcrt/httpserver"
+)
+
+func get(t *testing.T, url string) (int, string) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
+}
+
+func TestStartReturnsOnceListeningAndAddrIsResolved(t *testing.T) {
+	t.Parallel()
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "ok")
+	})
+	s := httpserver.New(h, httpserver.Options{Addr: "127.0.0.1:0"})
+
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Shutdown(context.Background()) })
+
+	addr := s.Addr()
+	if addr == "" || addr == "127.0.0.1:0" {
+		t.Fatalf("Addr() = %q, want a resolved host:port", addr)
+	}
+	// Start returned, so the listener must already accept — no retry loop.
+	if code, body := get(t, "http://"+addr); code != 200 || body != "ok" {
+		t.Errorf("GET = %d %q, want 200 \"ok\"", code, body)
+	}
+}
+
+func TestStartOnABusyPortReturnsAnError(t *testing.T) {
+	t.Parallel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{Addr: ln.Addr().String()})
+	if err := s.Start(context.Background()); err == nil {
+		_ = s.Shutdown(context.Background())
+		t.Fatal("Start succeeded on an occupied port")
+	}
+}
+
+func TestShutdownDrainsAnInFlightRequest(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		fmt.Fprint(w, "finished")
+	})
+	s := httpserver.New(h, httpserver.Options{Addr: "127.0.0.1:0"})
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		code int
+		body string
+	}
+	res := make(chan result, 1)
+	go func() {
+		c, b := get(t, "http://"+s.Addr())
+		res <- result{c, b}
+	}()
+	time.Sleep(50 * time.Millisecond) // let the request reach the handler
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- s.Shutdown(context.Background()) }()
+
+	close(release)
+
+	select {
+	case r := <-res:
+		if r.code != 200 || r.body != "finished" {
+			t.Errorf("in-flight request = %d %q, want 200 \"finished\"", r.code, r.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("in-flight request never completed")
+	}
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown did not return")
+	}
+}
+
+// ErrServerClosed is the normal result of Shutdown and must never be reported.
+func TestOnServeErrorIsNotCalledOnGracefulShutdown(t *testing.T) {
+	t.Parallel()
+	var (
+		mu     sync.Mutex
+		called []error
+	)
+	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{
+		Addr: "127.0.0.1:0",
+		OnServeError: func(err error) {
+			mu.Lock()
+			called = append(called, err)
+			mu.Unlock()
+		},
+	})
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(called) != 0 {
+		t.Errorf("OnServeError called with %v on a graceful shutdown", called)
+	}
+}
+
+func TestOnServeErrorFiresWhenTheListenerDies(t *testing.T) {
+	t.Parallel()
+	got := make(chan error, 1)
+	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{
+		Addr:         "127.0.0.1:0",
+		OnServeError: func(err error) { got <- err },
+	})
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Shutdown(context.Background()) })
+
+	if err := s.CloseListener(); err != nil {
+		t.Fatalf("CloseListener: %v", err)
+	}
+
+	select {
+	case err := <-got:
+		if err == nil || errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("OnServeError got %v, want a real serve error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnServeError never fired after the listener closed")
+	}
+}
+
+// An unset ReadHeaderTimeout is a Slowloris hole; it must never be zero.
+func TestReadHeaderTimeoutIsNeverZero(t *testing.T) {
+	t.Parallel()
+	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{Addr: "127.0.0.1:0"})
+	if d := s.ReadHeaderTimeoutForTest(); d <= 0 {
+		t.Errorf("ReadHeaderTimeout = %v, want a non-zero default", d)
+	}
+}
+
+func TestReadHeaderTimeoutDefaultIsTenSeconds(t *testing.T) {
+	t.Parallel()
+	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{Addr: "127.0.0.1:0"})
+	if d := s.ReadHeaderTimeoutForTest(); d != 10*time.Second {
+		t.Errorf("ReadHeaderTimeout default = %v, want 10s", d)
+	}
+}
+
+func TestExplicitReadHeaderTimeoutIsKept(t *testing.T) {
+	t.Parallel()
+	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{
+		Addr: "127.0.0.1:0", ReadHeaderTimeout: 3 * time.Second,
+	})
+	if d := s.ReadHeaderTimeoutForTest(); d != 3*time.Second {
+		t.Errorf("ReadHeaderTimeout = %v, want 3s", d)
+	}
+}
+
+func TestAddrBeforeStartIsTheConfiguredValue(t *testing.T) {
+	t.Parallel()
+	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{Addr: "127.0.0.1:8080"})
+	if got := s.Addr(); got != "127.0.0.1:8080" {
+		t.Errorf("Addr() before Start = %q, want the configured address", got)
+	}
+}
+
+func TestStartWithAPreCancelledContextAbortsTheBind(t *testing.T) {
+	t.Parallel()
+	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{Addr: "127.0.0.1:0"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := s.Start(ctx); err == nil {
+		_ = s.Shutdown(context.Background())
+		t.Fatal("Start succeeded with a pre-cancelled context")
+	}
+	if addr := s.Addr(); addr != "127.0.0.1:0" {
+		t.Errorf("Addr() = %q after a failed Start, want the unresolved configured address", addr)
+	}
+}
+
+func TestShutdownBeforeStartIsANoOp(t *testing.T) {
+	t.Parallel()
+	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{Addr: "127.0.0.1:0"})
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Errorf("Shutdown before Start = %v, want nil", err)
+	}
+}
+
+// A Shutdown call before Start must be a true no-op: it must not touch the
+// underlying *http.Server. If it did (by falling through to
+// s.srv.Shutdown(ctx) instead of returning early), that server is marked
+// permanently shut down, and a later Start's Serve goroutine exits and closes
+// the listener immediately -- silently killing every request on that port.
+func TestShutdownBeforeStartDoesNotPreventALaterStart(t *testing.T) {
+	t.Parallel()
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "ok")
+	})
+	s := httpserver.New(h, httpserver.Options{Addr: "127.0.0.1:0"})
+
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown before Start = %v, want nil", err)
+	}
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start after a pre-Start Shutdown: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Shutdown(context.Background()) })
+
+	if code, body := get(t, "http://"+s.Addr()); code != 200 || body != "ok" {
+		t.Errorf("GET after Start = %d %q, want 200 \"ok\"", code, body)
+	}
+}
+
+// Once Shutdown has actually stopped a running Server, a later Start must
+// refuse rather than silently succeed: the underlying http.Server is sealed
+// permanently by Go itself, so a second Serve on it returns
+// http.ErrServerClosed immediately -- swallowed by Start's goroutine as the
+// normal graceful case -- and the caller would be left with a "successful"
+// Start, a real-looking Addr, and a listener that refuses every connection.
+func TestStartAfterAShutdownThatStoppedAServerReturnsAnError(t *testing.T) {
+	t.Parallel()
+	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{Addr: "127.0.0.1:0"})
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	err := s.Start(context.Background())
+	if err == nil {
+		_ = s.Shutdown(context.Background())
+		t.Fatal("Start after a real Shutdown succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "already shut down") {
+		t.Errorf("error = %q, want it to name the situation (\"already shut down\")", err.Error())
+	}
+}
+
+// Shutdown must release its mutex before returning, or any later call that
+// needs it (Addr, or a second Shutdown) deadlocks forever.
+func TestShutdownReleasesItsLock(t *testing.T) {
+	t.Parallel()
+	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{Addr: "127.0.0.1:0"})
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		s.Addr()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Addr() after Shutdown deadlocked; Shutdown must release its mutex")
+	}
+}
+
+// CloseListener is exported for consumers in other modules, so its contract
+// before Start -- nil, no panic on the nil listener -- is part of the API,
+// not an internal detail.
+func TestCloseListenerBeforeStartIsANoop(t *testing.T) {
+	t.Parallel()
+	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{Addr: "127.0.0.1:0"})
+	if err := s.CloseListener(); err != nil {
+		t.Errorf("CloseListener before Start = %v, want nil", err)
+	}
+}
+
+// CloseListener must report what Close reported, not a blanket nil: a caller
+// that gets nil back believes the listener is gone. Closing twice is the
+// cheapest way to observe a real result, since the second close of a closed
+// listener always fails.
+func TestCloseListenerReportsCloseFailure(t *testing.T) {
+	t.Parallel()
+	s := httpserver.New(http.NotFoundHandler(), httpserver.Options{Addr: "127.0.0.1:0"})
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Shutdown(context.Background()) })
+
+	if err := s.CloseListener(); err != nil {
+		t.Fatalf("first CloseListener = %v, want nil", err)
+	}
+	if err := s.CloseListener(); err == nil {
+		t.Error("second CloseListener = nil; the error from Close is being swallowed")
+	}
+}
+
+// markerHandler is a comparable http.Handler, so the Handler wiring can be
+// asserted by identity. http.HandlerFunc is not comparable and panics on ==.
+type markerHandler struct{ id int }
+
+func (markerHandler) ServeHTTP(http.ResponseWriter, *http.Request) {}
+
+// TestOptionsLandOnTheHTTPServerFieldForField covers the six copies New makes
+// from Options into http.Server. Only ReadHeaderTimeout had tests; deleting
+// any of the other four left the whole suite green, and go-mutesting does not
+// mutate struct-literal field assignments, so the mutation gate is blind to
+// them too. A silently dropped WriteTimeout is the hazard the package doc
+// opens with: a slow client pinning a response goroutine indefinitely.
+//
+// Every value is distinct on purpose. Identical values still pass when two
+// fields are swapped, so distinctness is what catches a swap rather than
+// only a drop.
+func TestOptionsLandOnTheHTTPServerFieldForField(t *testing.T) {
+	t.Parallel()
+
+	h := markerHandler{7}
+	srv := httpserver.New(h, httpserver.Options{
+		Addr:              "127.0.0.1:0",
+		ReadHeaderTimeout: 1 * time.Second,
+		ReadTimeout:       2 * time.Second,
+		WriteTimeout:      3 * time.Second,
+		IdleTimeout:       4 * time.Second,
+		MaxHeaderBytes:    5000,
+	}).HTTPServerForTest()
+
+	for _, tc := range []struct {
+		field string
+		got   any
+		want  any
+	}{
+		{"Handler", srv.Handler, http.Handler(h)},
+		{"ReadHeaderTimeout", srv.ReadHeaderTimeout, 1 * time.Second},
+		{"ReadTimeout", srv.ReadTimeout, 2 * time.Second},
+		{"WriteTimeout", srv.WriteTimeout, 3 * time.Second},
+		{"IdleTimeout", srv.IdleTimeout, 4 * time.Second},
+		{"MaxHeaderBytes", srv.MaxHeaderBytes, 5000},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("http.Server.%s = %v, want %v (Options.%s)", tc.field, tc.got, tc.want, tc.field)
+		}
+	}
+}

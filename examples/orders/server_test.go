@@ -18,7 +18,7 @@ func newTestServer(t *testing.T) (http.Handler, func() string) {
 	t.Helper()
 	var buf bytes.Buffer
 	log := logging.New(&buf, logging.Options{Level: slog.LevelDebug})
-	svc := NewService(map[string]*Order{"1": {ID: "1", Qty: 3}})
+	svc := NewService(openStore(map[string]*Order{"1": {ID: "1", Qty: 3}}))
 	return newServer(svc, log), buf.String
 }
 
@@ -196,7 +196,7 @@ func TestAcceptanceLogLineCarriesRouteAndStatus(t *testing.T) {
 func TestTypedMiddlewareChainAppliesInOrder(t *testing.T) {
 	t.Parallel()
 
-	svc := NewService(map[string]*Order{"1": {ID: "1", Qty: 3}})
+	svc := NewService(openStore(map[string]*Order{"1": {ID: "1", Qty: 3}}))
 	var calls int
 
 	h := contract.Chain(RejectEmptyID, CountCalls(&calls))(svc.GetOrder)

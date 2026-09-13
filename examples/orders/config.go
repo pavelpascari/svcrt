@@ -26,6 +26,16 @@ type AppConfig struct {
 	// Optional block: nil unless some TLS_ variable is set. Once any is set,
 	// both Cert and Key become required.
 	TLS *TLSConfig `envPrefix:"TLS_"`
+
+	// AdminAddr is the admin surface: probes, and pprof if you mount it. It
+	// belongs on a port separate from application traffic so it is not
+	// publicly routable.
+	AdminAddr string `env:"ADMIN_ADDR" default:":9090"`
+
+	// DrainDelay is how long to keep serving after readiness goes false, so a
+	// load balancer notices before the listener closes. Zero drops traffic
+	// that arrives in that window.
+	DrainDelay time.Duration `env:"DRAIN_DELAY" default:"5s"`
 }
 
 type OTelConfig struct {

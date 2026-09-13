@@ -5,21 +5,10 @@ cd "$(dirname "$0")/.."
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# Library modules that must each stand alone with zero external dependencies.
-#
-# Derived from the go.mod files on disk rather than hand-listed: this list
-# used to be duplicated here and in release.sh, and two hand-kept copies is
-# how a module added at R1 ends up ungated with nobody noticing. Exemplars
-# live under examples/ and are deliberately excluded -- they depend on the
-# libraries and are handled separately below.
-MODULES=()
-for f in */go.mod; do
-  [ -f "$f" ] || continue
-  m=${f%/go.mod}
-  [ "$m" = "examples" ] && continue
-  MODULES+=("$m")
-done
-[ ${#MODULES[@]} -gt 0 ] || fail "no library modules found (expected */go.mod)"
+# MODULES, EXEMPLARS, COUNT_MODULES and count_for -- derived from disk and
+# shared with release.sh, which applies the same -count policy before it tags.
+# lib.sh also asserts every COUNT_MODULES name is a module that exists.
+. scripts/lib.sh
 
 for m in "${MODULES[@]}"; do
   echo "== $m =="
@@ -27,7 +16,7 @@ for m in "${MODULES[@]}"; do
   # Spec P2: useful with no other svcrt module present. GOWORK=off is the
   # point -- go.work masks version skew locally, so CI must run without it.
   (cd "$m" && GOWORK=off go vet ./...) || fail "$m: go vet"
-  (cd "$m" && GOWORK=off go test -race ./...) || fail "$m: go test"
+  (cd "$m" && GOWORK=off go test -race -count=$(count_for "$m") ./...) || fail "$m: go test"
 
   # Spec §8.2: zero requires. Exactly one line -- the module itself.
   # Assigned inside `if !` so a go list failure reports through fail() with
@@ -55,10 +44,22 @@ done
 grep -q '^go 1\.22$' contract/go.mod ||
   fail "contract/go.mod no longer declares 'go 1.22'; that floor is a deliberate compatibility commitment for the one module that freezes (spec §4). If raising it is intended, change it here too."
 
-# The example depends on three unpublished modules, so unlike the libraries it
-# runs WITH the workspace. This is the one place go.work is load-bearing.
-echo "== examples/orders =="
-(cd examples/orders && go vet ./...) || fail "examples/orders: go vet"
-(cd examples/orders && go test -race ./...) || fail "examples/orders: go test"
+# Exemplars depend on unpublished modules, so unlike the libraries they run
+# WITH the workspace -- this is the one place go.work is load-bearing.
+#
+# Derived in lib.sh rather than listed, same reasoning as MODULES: a second
+# exemplar added later must not be silently ungated. Guarded here: an unmatched glob would leave the loop
+# body unrun and this script would print OK having tested zero exemplars --
+# every acceptance suite silently skipped. That is not hypothetical: fold the
+# two exemplars into a single examples/go.mod (orders/ and worker/ as
+# packages) and examples/*/go.mod matches nothing, while the library loop
+# above already skips "examples" by name.
+[ ${#EXEMPLARS[@]} -gt 0 ] || fail "no exemplars found under examples/*/go.mod; the acceptance suites are not running"
+
+for e in "${EXEMPLARS[@]}"; do
+  echo "== $e =="
+  (cd "$e" && go vet ./...) || fail "$e: go vet"
+  (cd "$e" && go test -race ./...) || fail "$e: go test"
+done
 
 echo "OK"
