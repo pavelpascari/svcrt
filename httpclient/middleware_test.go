@@ -49,12 +49,27 @@ func TestChainAppliesFirstArgumentOutermost(t *testing.T) {
 	}
 }
 
+// marker wraps a RoundTripper in a comparable type so Chain()'s identity can
+// be asserted with ==. RoundTripperFunc cannot be compared -- func values are
+// not comparable -- which is why this test previously checked only that the
+// terminal was still reachable. Reachability is the weaker claim: a Chain()
+// that returned a pass-through wrapper would satisfy it while breaking the
+// documented "returns the identity middleware". A pointer to a struct is
+// always comparable, so the stronger claim costs one type.
+type marker struct{ http.RoundTripper }
+
 func TestChainWithNoMiddlewareIsIdentity(t *testing.T) {
 	t.Parallel()
 	var log []string
 
-	base := terminal(&log)
+	base := &marker{terminal(&log)}
 	rt := httpclient.Chain()(base)
+
+	// The contract in middleware.go: Chain() returns the identity, not merely
+	// something that eventually reaches base.
+	if rt != http.RoundTripper(base) {
+		t.Errorf("Chain()(base) = %T, want base itself; Chain with no arguments must be the identity, not a wrapper", rt)
+	}
 
 	req, _ := http.NewRequest("GET", "http://example.invalid/", nil)
 	if _, err := rt.RoundTrip(req); err != nil {

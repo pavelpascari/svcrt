@@ -2,9 +2,13 @@ package httpclient_test
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,6 +30,30 @@ func transportOf(t *testing.T, c *http.Client) *http.Transport {
 // http.Transport contains a sync.Mutex, so copying one by value trips vet's
 // copylocks check -- and `go test` does not run copylocks, so it fails only in
 // ci.sh's `go vet`. Snapshot the fields under test instead.
+//
+// ForceAttemptHTTP2, Proxy and DialContext are here deliberately: they are the
+// three fields this module spent the milestone learning to care about, and the
+// R2 review confirmed that without them New could downgrade the whole process
+// to HTTP/1.1 and disable every proxy environment variable with the suite
+// still green. Proxy and DialContext are funcs, which are not comparable --
+// hence the uintptr: reflect.Value.Pointer() is a legal comparable stand-in
+// for func identity, and it keeps the struct comparable so `before != after`
+// compiles and copylocks stays happy.
+//
+// What that stand-in does and does not catch, established by running it:
+// Pointer() returns a CODE pointer, so nil-ing a func field is caught, and
+// replacing it with a different function is caught (verified for both Proxy
+// and DialContext). The bounded gap is one method value replaced by another
+// method value of the SAME method on a different receiver -- every
+// (*net.Dialer).DialContext in the process shares one code pointer. Proxy has
+// no such blind spot (http.ProxyFromEnvironment is a plain top-level func) and
+// ForceAttemptHTTP2 is a bool, so the two fields the review's sabotage
+// actually used are fully discriminated.
+//
+// A stdlib-only discriminator does exist: the stored field's funcval address,
+// read through unsafe.Pointer, is stable across reads and does change when the
+// receiver changes. It is declined deliberately -- unsafe plus a dependence on
+// runtime funcval layout is too high a price for a tripwire in a test.
 type transportSnapshot struct {
 	maxIdleConns          int
 	maxIdleConnsPerHost   int
@@ -33,6 +61,23 @@ type transportSnapshot struct {
 	tlsHandshakeTimeout   time.Duration
 	responseHeaderTimeout time.Duration
 	expectContinueTimeout time.Duration
+	forceAttemptHTTP2     bool
+	proxy                 uintptr
+	dialContext           uintptr
+}
+
+// funcPointer returns a comparable identity for a func value, or 0 for nil.
+// reflect.Value.Pointer panics on an invalid Value, which a nil interface
+// yields, so the nil case is handled before reflect sees it.
+func funcPointer(fn any) uintptr {
+	if fn == nil {
+		return 0
+	}
+	v := reflect.ValueOf(fn)
+	if v.IsNil() {
+		return 0
+	}
+	return v.Pointer()
 }
 
 func snapshotTransport(tr *http.Transport) transportSnapshot {
@@ -43,6 +88,9 @@ func snapshotTransport(tr *http.Transport) transportSnapshot {
 		tlsHandshakeTimeout:   tr.TLSHandshakeTimeout,
 		responseHeaderTimeout: tr.ResponseHeaderTimeout,
 		expectContinueTimeout: tr.ExpectContinueTimeout,
+		forceAttemptHTTP2:     tr.ForceAttemptHTTP2,
+		proxy:                 funcPointer(tr.Proxy),
+		dialContext:           funcPointer(tr.DialContext),
 	}
 }
 
@@ -80,6 +128,55 @@ func TestZeroOptionsProduceTheDocumentedDefaults(t *testing.T) {
 	}
 }
 
+// TestNegativeOptionsProduceTheDocumentedDefaults covers the finding that a
+// negative duration reaches http.Transport/net.Dialer unclamped: both treat a
+// non-positive timeout as NO deadline at all, which is the opposite of what
+// the caller asked for. Every field here gets a DISTINCT negative value, same
+// reasoning as TestEveryOptionLandsOnItsOwnDestination -- a shared value would
+// pass even if a field's clamp were wired to the wrong destination.
+func TestNegativeOptionsProduceTheDocumentedDefaults(t *testing.T) {
+	t.Parallel()
+	c := httpclient.New(httpclient.Options{
+		TLSHandshakeTimeout:   -1 * time.Second,
+		ResponseHeaderTimeout: -2 * time.Second,
+		IdleConnTimeout:       -3 * time.Second,
+		ExpectContinueTimeout: -4 * time.Second,
+		MaxIdleConns:          -5,
+		MaxIdleConnsPerHost:   -6,
+	})
+	tr := transportOf(t, c)
+
+	for _, tc := range []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"TLSHandshakeTimeout", tr.TLSHandshakeTimeout, 10 * time.Second},
+		{"ResponseHeaderTimeout", tr.ResponseHeaderTimeout, 10 * time.Second},
+		{"IdleConnTimeout", tr.IdleConnTimeout, 90 * time.Second},
+		{"ExpectContinueTimeout", tr.ExpectContinueTimeout, 1 * time.Second},
+		{"MaxIdleConns", tr.MaxIdleConns, 100},
+		{"MaxIdleConnsPerHost", tr.MaxIdleConnsPerHost, 100},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %v, want documented default %v", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
+// TestNegativeTimeoutPassesThroughUnchanged proves the fix was not
+// over-applied: Options.Timeout has no default (0 deliberately means "no
+// blanket timeout", spec 3.3), so unlike every other numeric field it must
+// NOT be routed through orDuration. A negative value here must reach
+// http.Client.Timeout untouched.
+func TestNegativeTimeoutPassesThroughUnchanged(t *testing.T) {
+	t.Parallel()
+	c := httpclient.New(httpclient.Options{Timeout: -8 * time.Second})
+	if got, want := c.Timeout, -8*time.Second; got != want {
+		t.Errorf("Client.Timeout = %v, want %v (Timeout must pass through unclamped)", got, want)
+	}
+}
+
 // Every field gets a DISTINCT value. Identical values would pass even if two
 // fields were wired to each other's destinations, and go-mutesting does not
 // mutate struct-literal field assignments -- so this table is the only thing
@@ -88,7 +185,9 @@ func TestZeroOptionsProduceTheDocumentedDefaults(t *testing.T) {
 // reason.
 func TestEveryOptionLandsOnItsOwnDestination(t *testing.T) {
 	t.Parallel()
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS13}
 	c := httpclient.New(httpclient.Options{
+		TLSClientConfig:       tlsCfg,
 		TLSHandshakeTimeout:   11 * time.Second,
 		ResponseHeaderTimeout: 12 * time.Second,
 		IdleConnTimeout:       13 * time.Second,
@@ -111,6 +210,9 @@ func TestEveryOptionLandsOnItsOwnDestination(t *testing.T) {
 		{"MaxIdleConns", tr.MaxIdleConns, 15},
 		{"MaxIdleConnsPerHost", tr.MaxIdleConnsPerHost, 16},
 		{"Client.Timeout", c.Timeout, 17 * time.Second},
+		// Pointer identity, which is as distinct as a value gets: nothing
+		// else in Options could land here by accident.
+		{"TLSClientConfig", tr.TLSClientConfig, tlsCfg},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s = %v, want %v", tc.name, tc.got, tc.want)
@@ -135,8 +237,12 @@ func TestMiddlewareWrapsTheTransport(t *testing.T) {
 	if !middlewareCalled {
 		t.Error("middleware was not called")
 	}
-	if _, ok := c.Transport.(httpclient.RoundTripperFunc); !ok {
-		t.Errorf("c.Transport is %T, want httpclient.RoundTripperFunc", c.Transport)
+	// New wraps the middleware's return value in an unexported forwarding
+	// type (see TestCloseIdleConnectionsSurvivesMiddleware), so the assertion
+	// this test can make from outside the package is that c.Transport is no
+	// longer the raw transport.
+	if _, ok := c.Transport.(*http.Transport); ok {
+		t.Error("c.Transport is the raw *http.Transport; middleware did not wrap it")
 	}
 }
 
@@ -293,8 +399,14 @@ func TestContextCancellationAbortsAnInFlightRequest(t *testing.T) {
 
 	// Wait until the server has the request, so cancellation lands mid-flight
 	// rather than before the dial.
+	deadline := time.After(5 * time.Second) // same budget as the select below
 	for !served.Load() {
-		time.Sleep(time.Millisecond)
+		select {
+		case <-deadline:
+			t.Fatal("server never received the request within 5s; cancellation would not have landed mid-flight")
+		default:
+			time.Sleep(time.Millisecond)
+		}
 	}
 	cancel()
 
@@ -305,5 +417,109 @@ func TestContextCancellationAbortsAnInFlightRequest(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("cancelling the context did not abort the request within 5s")
+	}
+}
+
+// The third silent loss, found at the R2 review. http.Client.CloseIdleConnections
+// type-asserts c.Transport to interface{ CloseIdleConnections() } and does
+// nothing when the assertion fails, and RoundTripperFunc -- the wrapper this
+// package exports for middleware authors -- has no such method. So before the
+// forwarding wrapper, setting Options.Middleware silently disabled the exact
+// shutdown recipe New's doc comment prescribes.
+//
+// Asserting the wrapper's type would prove the spelling. This makes a real
+// request through middleware, reads the body to EOF so the connection is
+// genuinely returned to the pool (an unread body is never pooled, which would
+// make the test pass for the wrong reason), confirms the server still holds it
+// open, and only then calls CloseIdleConnections -- so what is asserted is the
+// connection actually going away.
+func TestCloseIdleConnectionsSurvivesMiddleware(t *testing.T) {
+	t.Parallel()
+	var open atomic.Int64
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "hello")
+	}))
+	ts.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		switch state {
+		case http.StateNew:
+			open.Add(1)
+		case http.StateClosed, http.StateHijacked:
+			open.Add(-1)
+		}
+	}
+	ts.Start()
+	defer ts.Close()
+
+	c := httpclient.New(httpclient.Options{
+		Middleware: func(next http.RoundTripper) http.RoundTripper {
+			return httpclient.RoundTripperFunc(next.RoundTrip)
+		},
+	})
+
+	resp, err := c.Get(ts.URL)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	resp.Body.Close()
+
+	// Control: the connection must be pooled, or the assertion below would
+	// hold no matter what CloseIdleConnections did.
+	waitFor(t, func() bool { return open.Load() == 1 },
+		"the request never produced a pooled connection, so this test could not observe one being closed")
+
+	c.CloseIdleConnections()
+
+	waitFor(t, func() bool { return open.Load() == 0 },
+		"connection still open after CloseIdleConnections: middleware severed the shutdown path New documents")
+}
+
+// waitFor polls cond until it holds, failing with msg after 5s -- the same
+// budget as every other bound in this file.
+func waitFor(t *testing.T, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal(msg)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestZeroOptionsProduceTheDocumentedDefaults hard-codes these four values on
+// purpose: they pin OUR contract, and a caller reading the package
+// documentation should get what it says regardless of what the stdlib does
+// next. This test pins the other half of the claim -- that those four are
+// still http.DefaultTransport's own, which is what client.go's "read off
+// go1.26" sentence asserts. Without it that sentence is a fact about a
+// specific release with nothing to re-check it, and a stdlib change would rot
+// the comment silently instead of failing here.
+//
+// The three deliberate deviations (DialTimeout, ResponseHeaderTimeout,
+// MaxIdleConnsPerHost) are absent by design: they are where we disagree with
+// the stdlib, so equality is exactly what must NOT be asserted.
+func TestSharedDefaultsStillMatchTheStdlib(t *testing.T) {
+	// Deliberately NOT t.Parallel: reads the process-wide
+	// http.DefaultTransport, same reasoning as TestNewDoesNotTouchTheProcessGlobals.
+	dt := http.DefaultTransport.(*http.Transport)
+	tr := transportOf(t, httpclient.New(httpclient.Options{}))
+
+	for _, tc := range []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"TLSHandshakeTimeout", tr.TLSHandshakeTimeout, dt.TLSHandshakeTimeout},
+		{"IdleConnTimeout", tr.IdleConnTimeout, dt.IdleConnTimeout},
+		{"ExpectContinueTimeout", tr.ExpectContinueTimeout, dt.ExpectContinueTimeout},
+		{"MaxIdleConns", tr.MaxIdleConns, dt.MaxIdleConns},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %v, but http.DefaultTransport now uses %v; this value is documented as the stdlib's own, so either adopt the new one or record it as a fourth deliberate deviation",
+				tc.name, tc.got, tc.want)
+		}
 	}
 }
