@@ -7,14 +7,25 @@ import (
 	"testing"
 )
 
-// endlessBody yields bytes forever and records how many were read. It models
-// the case maxDrain exists for: an upstream whose error page never ends.
+// endlessBody models the case maxDrain exists for: an upstream whose error
+// page does not end. It stops at 8*maxDrain rather than genuinely never
+// ending, so that removing the cap FAILS these tests instead of hanging
+// them -- an unbounded io.Copy from a truly endless reader never returns,
+// and what a contributor who deleted the cap would get is ten minutes of
+// apparently-wedged CI (go test's default timeout) and then a goroutine
+// dump to interpret. The bound is 8x the cap so any plausible
+// off-by-a-power-of-two in maxDrain is still well inside it, and the byte
+// count stays exact: io.LimitReader yields exactly its limit before EOF
+// while the underlying reader neither ends nor short-reads.
 type endlessBody struct {
 	read   atomic.Int64
 	closed atomic.Bool
 }
 
 func (e *endlessBody) Read(p []byte) (int, error) {
+	if e.read.Load() >= 8*maxDrain {
+		return 0, io.EOF
+	}
 	e.read.Add(int64(len(p)))
 	return len(p), nil
 }
@@ -26,12 +37,9 @@ func (e *endlessBody) Close() error {
 
 // TestDrainIsBoundedAndStillCloses pins maxDrain. Without the cap -- i.e.
 // io.Copy(io.Discard, resp.Body) instead of io.Copy(io.Discard,
-// io.LimitReader(resp.Body, maxDrain)) -- this test does not fail, it HANGS:
-// an unbounded copy from an endless reader never returns, so drain never
-// gets to the Close call this test checks. Run it with -timeout when
-// deliberately breaking the cap to confirm that; a panic with a goroutine
-// dump naming io.Copy is the expected evidence of the missing cap, not a
-// clean test failure.
+// io.LimitReader(resp.Body, maxDrain)) -- drain reads the whole of
+// endlessBody's 8*maxDrain and this test fails, in under a second, saying
+// so.
 func TestDrainIsBoundedAndStillCloses(t *testing.T) {
 	t.Parallel()
 	body := &endlessBody{}
