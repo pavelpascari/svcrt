@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -851,5 +852,59 @@ func TestTheRetryAfterCapIsExactlyThirtySeconds(t *testing.T) {
 		if got := calls.Load(); got != tc.wantAttempts {
 			t.Errorf("Retry-After: %s -- attempts = %d, want %d (the cap is not exactly %v)", tc.header, got, tc.wantAttempts, 30*time.Second)
 		}
+	}
+}
+
+// http.RoundTripper's contract forbids modifying the request: a RoundTripper
+// may consume its Body and must otherwise leave it alone. attemptRequest's
+// Clone is what keeps that promise across retries, and nothing held it down
+// -- replacing the clone with `req.Body = body; return req` survived the
+// whole suite at review.
+//
+// Writing this test naively produces a vacuous one. Stamping a header in the
+// transport and asserting the caller's request is unstamped fails at HEAD
+// too, because attempt 1 legitimately IS the caller's request. The assertion
+// has to distinguish attempts: attempt 1 is the original by design, every
+// attempt after it must be a different *http.Request, and the caller's copy
+// must carry only attempt 1's mark.
+func TestARetriedAttemptDoesNotMutateTheCallersRequest(t *testing.T) {
+	t.Parallel()
+	var seen []*http.Request
+
+	rt := resilience.Retry(resilience.Policy{
+		MaxAttempts:  3,
+		Backoff:      resilience.Constant(0),
+		RetryMethods: []string{http.MethodPost}, // opted in, so the body is replayed and cloned
+	})(rtFunc(func(r *http.Request) (*http.Response, error) {
+		seen = append(seen, r)
+		r.Header.Set("X-Attempt", strconv.Itoa(len(seen)))
+		return respond(http.StatusServiceUnavailable), nil
+	}))
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		"http://x.invalid/", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	resp.Body.Close()
+
+	if len(seen) != 3 {
+		t.Fatalf("attempts = %d, want 3", len(seen))
+	}
+	if seen[0] != req {
+		t.Error("attempt 1 sent a copy; it must send the caller's own request, body and all")
+	}
+	for i, got := range seen[1:] {
+		if got == req {
+			t.Errorf("attempt %d sent the caller's own *http.Request; a retry must send a clone", i+2)
+		}
+	}
+	if got := req.Header.Get("X-Attempt"); got != "1" {
+		t.Errorf("the caller's request came back stamped %q, want %q -- a later attempt's mutations reached it", got, "1")
 	}
 }
