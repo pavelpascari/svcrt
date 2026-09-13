@@ -609,6 +609,50 @@ func TestARequestWhoseBodyCannotBeRebuiltReturnsTheRebuildError(t *testing.T) {
 	}
 }
 
+// TestTheReturnedResponseIsNotDrained, as specified, sends a request that
+// succeeds on the very first attempt -- RetryIf is false immediately, so the
+// loop returns before ever reaching the canWait/drain code, regardless of
+// their order. It cannot catch the ordering hazard the code comment warns
+// about. This test exercises the path that can: a retryable first response
+// with a deadline too tight to retry into. If drain ran before the canWait
+// check, the response handed back here would already be closed and empty.
+func TestTheReturnedResponseIsNotDrainedWhenTheDeadlineIsExhausted(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int64
+	rt := resilience.Retry(resilience.Policy{
+		MaxAttempts: 5,
+		Backoff:     resilience.Constant(10 * time.Second),
+	})(rtFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return respond(http.StatusServiceUnavailable), nil
+	}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://x.invalid/", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("attempts = %d, want 1 (deadline too tight to retry)", got)
+	}
+
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading the returned body: %v", err)
+	}
+	if string(b) != "body" {
+		t.Errorf("returned body = %q, want %q -- draining ran before the deadline check consumed it", b, "body")
+	}
+}
+
 // Carried finding from Task 2's review: the attempt cap and RetryIf must be
 // checked BEFORE the backoff is computed. A Backoff that records the attempts
 // it is asked about pins this -- it must never be asked about the final
