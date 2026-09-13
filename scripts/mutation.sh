@@ -75,13 +75,14 @@ MUTATION_EXCLUDE=(
 # The per-module variable wins over MUTATION_MIN.
 MUTATION_FLOOR_DEFAULT=0.85
 MUTATION_FLOORS=(
-  # logging has 5 provably equivalent mutants out of 25 -- each documented in
+  # logging has 5 provably equivalent mutants out of 31 -- each documented in
   # docs/mutation-survivors.md with WHY ITS GUARD EXISTS, not just an
-  # equivalence proof -- which is a hard ceiling of 0.80. Three of them guard
-  # the per-request path, and mutation testing measures behaviour, not cost,
-  # so it is structurally blind to what they buy. Deleting them would raise
-  # this number by sacrificing the goal to its proxy. The binding rule is that
-  # every survivor is killed or justified in that file; this is a tripwire.
+  # equivalence proof -- which is a hard ceiling of 0.8387 (26/31). Three of
+  # them guard the per-request path, and mutation testing measures behaviour,
+  # not cost, so it is structurally blind to what they buy. Deleting them
+  # would raise this number by sacrificing the goal to its proxy. The binding
+  # rule is that every survivor is killed or justified in that file; this is
+  # a tripwire.
   "logging=0.80"
 )
 

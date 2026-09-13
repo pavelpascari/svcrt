@@ -45,21 +45,22 @@ dangerous default that a struct literal lets a caller omit by accident.
 
 R0 declared two spellings of `Middleware` — `contract.Middleware[Req, Res]`
 and a constructor, `logging.Middleware`, for the transport-level shape it was
-still only describing in prose — and warned a third *type* would be one too
-many. R1 added that third type anyway, deliberately, once `httpserver` needed
-a name, `httpserver.Middleware`, for the shape `logging.Middleware` had been
-building all along. R2 added a fourth, `httpclient.Middleware`, the
-client-side mirror of that third, once `httpclient` needed the same shape on
-`http.RoundTripper` instead of `http.Handler`. R3 needed that exact shape
-again, for `resilience`'s retry and timeout middleware, and did not add a
-fifth — see below for why declaring one would have been a mistake, not just a
-style preference. R4 then removed one of R0's original two: `logging.Middleware`
-had counted as its own entry only because its constructor lived in a
-different package from the type, `httpserver.Middleware`, it returned. Moving
-that constructor into `httpserver` as `AccessLog` closed the gap — a
-same-package constructor returning its own package's named type is just an
-instance of that type, not a spelling of its own, so it needs no separate
-entry here. Three stand:
+still only describing in prose — and warned that giving that transport-level
+shape its own named type, alongside `contract.Middleware[Req, Res]`, would be
+one too many. R1 added that type anyway, deliberately, once `httpserver`
+needed a name, `httpserver.Middleware`, for the shape `logging.Middleware`
+had been building all along. R2 added `httpclient.Middleware`, the
+client-side mirror of `httpserver.Middleware`, once `httpclient` needed the
+same shape on `http.RoundTripper` instead of `http.Handler`. R3 needed that
+exact shape again, for `resilience`'s retry and timeout middleware, and did
+not declare a type of its own for it — see below for why declaring one would
+have been a mistake, not just a style preference. R4 then removed one of
+R0's original two: `logging.Middleware` had counted as its own entry only
+because its constructor lived in a different package from the type,
+`httpserver.Middleware`, it returned. Moving that constructor into
+`httpserver` as `AccessLog` closed the gap — a same-package constructor
+returning its own package's named type is just an instance of that type, not
+a spelling of its own, so it needs no separate entry here. Three stand:
 
 - `contract.Middleware[Req, Res]` is a **generic type**: the call-level seam,
   `func(Handler[Req, Res]) Handler[Req, Res]`. It exists so hand-written and

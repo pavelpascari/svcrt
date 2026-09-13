@@ -31,7 +31,7 @@ func captureServe(t *testing.T, mux http.Handler, req *http.Request) (*httptest.
 	return rec, line
 }
 
-func TestMiddlewareLogsRoutePatternNotPath(t *testing.T) {
+func TestAccessLogLogsRoutePatternNotPath(t *testing.T) {
 	t.Parallel()
 
 	mux := http.NewServeMux()
@@ -57,7 +57,7 @@ func TestMiddlewareLogsRoutePatternNotPath(t *testing.T) {
 
 // A high-cardinality path must never reach the log line, even on a 404, or a
 // scanner can inflate log volume at will.
-func TestMiddlewareOmitsRouteWhenNoPatternMatched(t *testing.T) {
+func TestAccessLogOmitsRouteWhenNoPatternMatched(t *testing.T) {
 	t.Parallel()
 
 	mux := http.NewServeMux()
@@ -78,7 +78,7 @@ func TestMiddlewareOmitsRouteWhenNoPatternMatched(t *testing.T) {
 	}
 }
 
-func TestMiddlewareRecordsExplicitStatus(t *testing.T) {
+func TestAccessLogRecordsExplicitStatus(t *testing.T) {
 	t.Parallel()
 
 	mux := http.NewServeMux()
@@ -96,7 +96,7 @@ func TestMiddlewareRecordsExplicitStatus(t *testing.T) {
 	}
 }
 
-func TestMiddlewareDefaultsToStatus200OnImplicitWrite(t *testing.T) {
+func TestAccessLogDefaultsToStatus200OnImplicitWrite(t *testing.T) {
 	t.Parallel()
 
 	mux := http.NewServeMux()
@@ -117,7 +117,7 @@ func TestMiddlewareDefaultsToStatus200OnImplicitWrite(t *testing.T) {
 // than letting a later WriteHeader call overwrite it, which requires an
 // implicit Write to mark the writer as written just as an explicit
 // WriteHeader does.
-func TestMiddlewareIgnoresWriteHeaderAfterImplicitWrite(t *testing.T) {
+func TestAccessLogIgnoresWriteHeaderAfterImplicitWrite(t *testing.T) {
 	t.Parallel()
 
 	mux := http.NewServeMux()
@@ -135,7 +135,7 @@ func TestMiddlewareIgnoresWriteHeaderAfterImplicitWrite(t *testing.T) {
 
 // A naive ResponseWriter wrapper silently breaks SSE and connection upgrades.
 // The wrapper must stay transparent to http.ResponseController.
-func TestMiddlewarePreservesFlusherThroughResponseController(t *testing.T) {
+func TestAccessLogPreservesFlusherThroughResponseController(t *testing.T) {
 	t.Parallel()
 
 	var flushErr error
@@ -152,7 +152,7 @@ func TestMiddlewarePreservesFlusherThroughResponseController(t *testing.T) {
 	}
 }
 
-func TestMiddlewarePassesRequestThrough(t *testing.T) {
+func TestAccessLogPassesRequestThrough(t *testing.T) {
 	t.Parallel()
 
 	mux := http.NewServeMux()
@@ -170,7 +170,7 @@ func TestMiddlewarePassesRequestThrough(t *testing.T) {
 // The request you most want in the access log is the one that blew up.
 // LogAttrs used not to be deferred, so a panicking handler skipped it
 // entirely and the crash left no line at all.
-func TestMiddlewareLogsWhenTheHandlerPanics(t *testing.T) {
+func TestAccessLogLogsWhenTheHandlerPanics(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer

@@ -20,8 +20,7 @@ type ctxKey struct{}
 // "trace_id" here is just a representative attribute name. This file tests
 // that an Extractor's attrs reach the record, not that any particular key is
 // spelled a given way -- the key belongs to whichever module emits it.
-
-// traceExtractor stands in for the one svcrt/telemetry will ship at R3.
+// traceExtractor itself stands in for the one svcrt/telemetry will ship at R5.
 func traceExtractor() logging.Extractor {
 	return func(ctx context.Context) []slog.Attr {
 		id, ok := ctx.Value(ctxKey{}).(string)
@@ -79,7 +78,7 @@ func TestExtractorAddsAttrsFromContext(t *testing.T) {
 
 	got := lines()
 	if got[0]["trace_id"] != "abc123" {
-		t.Errorf("%s = %v, want abc123", "trace_id", got[0]["trace_id"])
+		t.Errorf("trace_id = %v, want abc123", got[0]["trace_id"])
 	}
 }
 
@@ -90,7 +89,7 @@ func TestExtractorContributesNothingWhenContextIsBare(t *testing.T) {
 	log.Info("hello")
 
 	if _, ok := lines()[0]["trace_id"]; ok {
-		t.Errorf("%s present with no value in context", "trace_id")
+		t.Errorf("trace_id present with no value in context")
 	}
 }
 
@@ -209,11 +208,11 @@ func TestExtractorAttrsStayTopLevelAboveGroup(t *testing.T) {
 
 	got := lines()[0]
 	if got["trace_id"] != "abc123" {
-		t.Errorf("%s = %v, want abc123 at top level", "trace_id", got["trace_id"])
+		t.Errorf("trace_id = %v, want abc123 at top level", got["trace_id"])
 	}
 	if req, ok := got["req"].(map[string]any); ok {
 		if _, nested := req["trace_id"]; nested {
-			t.Errorf("%s leaked into the req group: %v", "trace_id", req)
+			t.Errorf("trace_id leaked into the req group: %v", req)
 		}
 	}
 }
@@ -307,13 +306,13 @@ func TestFastPathAddsExtractorAttrsAfterRecordOwnAttrs(t *testing.T) {
 
 	line := buf.String()
 	xi := strings.Index(line, `"x"`)
-	ti := strings.Index(line, `"`+"trace_id"+`"`)
+	ti := strings.Index(line, `"trace_id"`)
 	if xi < 0 || ti < 0 {
-		t.Fatalf(`expected both "x" and %q in output: %s`, "trace_id", line)
+		t.Fatalf(`expected both "x" and "trace_id" in output: %s`, line)
 	}
 	if ti < xi {
-		t.Errorf("%s appeared before the call's own attrs on the fast path (no groups, no With); got: %s",
-			"trace_id", line)
+		t.Errorf("trace_id appeared before the call's own attrs on the fast path (no groups, no With); got: %s",
+			line)
 	}
 }
 
@@ -482,14 +481,14 @@ func TestExtractorAttrsStayTopLevelUnderWithGroup(t *testing.T) {
 
 	// The correlation key must be findable by name at the top level.
 	if got["trace_id"] != "abc123" {
-		t.Errorf("top-level %s = %v, want abc123", "trace_id", got["trace_id"])
+		t.Errorf("top-level trace_id = %v, want abc123", got["trace_id"])
 	}
 	group, ok := got["req"].(map[string]any)
 	if !ok {
 		t.Fatalf("req = %#v, want a group object", got["req"])
 	}
 	if _, nested := group["trace_id"]; nested {
-		t.Errorf("%s was nested inside the group: %#v", "trace_id", group)
+		t.Errorf("trace_id was nested inside the group: %#v", group)
 	}
 	if group["path"] != "/x" {
 		t.Errorf("req.path = %v, want /x", group["path"])
@@ -506,7 +505,7 @@ func TestExtractorAttrsStayTopLevelUnderNestedGroups(t *testing.T) {
 
 	got := lines()[0]
 	if got["trace_id"] != "abc123" {
-		t.Errorf("top-level %s missing: %#v", "trace_id", got)
+		t.Errorf("top-level trace_id missing: %#v", got)
 	}
 	a, ok := got["a"].(map[string]any)
 	if !ok {
@@ -520,10 +519,10 @@ func TestExtractorAttrsStayTopLevelUnderNestedGroups(t *testing.T) {
 		t.Errorf("a.b.k = %v, want v", b["k"])
 	}
 	if _, nested := a["trace_id"]; nested {
-		t.Errorf("%s leaked into the a group: %#v", "trace_id", a)
+		t.Errorf("trace_id leaked into the a group: %#v", a)
 	}
 	if _, nested := b["trace_id"]; nested {
-		t.Errorf("%s leaked into the a.b group: %#v", "trace_id", b)
+		t.Errorf("trace_id leaked into the a.b group: %#v", b)
 	}
 }
 
@@ -537,7 +536,7 @@ func TestWithAttrsBeforeGroupStillPlacesExtractorAtTopLevel(t *testing.T) {
 
 	got := lines()[0]
 	if got["trace_id"] != "abc123" {
-		t.Errorf("top-level %s missing: %#v", "trace_id", got)
+		t.Errorf("top-level trace_id missing: %#v", got)
 	}
 	if got["service"] != "orders" {
 		t.Errorf("service = %v, want orders", got["service"])
@@ -547,7 +546,7 @@ func TestWithAttrsBeforeGroupStillPlacesExtractorAtTopLevel(t *testing.T) {
 		t.Fatalf("req = %#v, want a group", got["req"])
 	}
 	if _, nested := req["trace_id"]; nested {
-		t.Errorf("%s leaked into the req group: %#v", "trace_id", req)
+		t.Errorf("trace_id leaked into the req group: %#v", req)
 	}
 }
 
