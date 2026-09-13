@@ -485,8 +485,6 @@ lc.Add("admin", admin.Start, admin.Shutdown, lifecycle.After(store))
 ctx, stop := lifecycle.SignalContext(context.Background())
 defer stop()
 
-h.Started.Set(true)
-h.Ready.Set(true)
 if err := lc.Run(ctx); err != nil {
     log.Error("stopped", "err", err)
     os.Exit(1)
@@ -496,6 +494,34 @@ if err := lc.Run(ctx); err != nil {
 `api` and `admin` are independent — both depend only on `store` — so they occupy
 the same level and start concurrently. That is the parallel path exercised by
 the exemplar rather than only by unit tests.
+
+> **Amended after R1's review.** This example originally opened the gates by
+> hand before `lc.Run`:
+>
+> ```go
+> h.Started.Set(true)
+> h.Ready.Set(true)
+> ```
+>
+> That is wrong about time, and the sentence directly above says why: `api` and
+> `admin` start *concurrently*, so gates opened before `Run` are already open
+> while `api` is still binding its listener, and `/readyz` answers 200 for a
+> service that cannot yet serve. It was also asymmetric — readiness closed
+> automatically via `OnDrain` but opened by hand.
+>
+> Both edges now belong to the lifecycle, which is the only thing that knows
+> when the last component finished starting:
+>
+> ```go
+> lc.OnStarted(h.Up)
+> lc.OnDrain(h.Drain)
+> ```
+>
+> `Health.Up` opens `Started` and `Ready`. `Live` is not among them: it is
+> opened by `NewHealth`, because a liveness probe failing asks the orchestrator
+> to restart the process, so a `Live` that waits for boot turns a slow start
+> into a restart loop. Neither module imports the other; the seam is still two
+> method values in your code.
 
 A second example, **`examples/worker`, with its own `go.mod` and a `use` entry in
 `go.work`** (matching how `examples/orders` is wired), carries no application
