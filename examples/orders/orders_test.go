@@ -453,3 +453,48 @@ func TestAcceptanceThePricingCallGivesUpAfterMaxAttempts(t *testing.T) {
 		t.Errorf("upstream saw %d attempts, want exactly 3 (MaxAttempts)", got)
 	}
 }
+
+// TestAcceptanceThePricingCallActuallyWaitsBetweenRetries pins that the
+// wiring's Backoff constant is genuinely wired in, not merely present in the
+// literal. go-mutesting found resilience.Constant(10 * time.Millisecond) ->
+// resilience.Constant(10 / time.Millisecond) surviving the whole suite:
+// integer division rounds that to a Backoff that always returns 0, so
+// retries fire back-to-back with no delay at all, and no other acceptance
+// test observes elapsed time.
+//
+// The two retries this scenario forces put a floor under the total time: at
+// the policy's 10ms constant, two backoffs alone take >= 20ms, before any
+// network round trip is added. 15ms leaves a comfortable margin under that
+// for scheduler jitter while staying far above what a zero-backoff mutant
+// produces -- three loopback HTTP round trips with no sleep at all finish in
+// low single-digit milliseconds.
+func TestAcceptanceThePricingCallActuallyWaitsBetweenRetries(t *testing.T) {
+	var attempts atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, "upstream is warming up")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"amount_minor":1250}`)
+	}))
+	defer upstream.Close()
+
+	s := newStack(t, 0, upstream.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.lc.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	start := time.Now()
+	if _, err := s.pricing.Quote(context.Background(), "SKU-1"); err != nil {
+		t.Fatalf("Quote: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	if elapsed < 15*time.Millisecond {
+		t.Errorf("elapsed = %v, want >= 15ms; two 10ms backoffs must actually happen between retries", elapsed)
+	}
+}
