@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -300,5 +301,71 @@ func TestAcceptanceShutdownReleasesThePricingClient(t *testing.T) {
 
 	if got := s.snapshot(); !slices.Contains(got, "stop:pricing-client") {
 		t.Errorf("shutdown did not release the pricing client: ops = %v", got)
+	}
+}
+
+// TestAcceptanceShutdownActuallyClosesThePricingConnection goes one step
+// further than the trace check above: go-mutesting found that buildStack's
+// call to pricing.CloseIdleConnections() can be replaced with a discarded
+// method value -- compiling, never firing, and still leaving the
+// "stop:pricing-client" trace line in place, since that line is written by
+// the surrounding closure regardless of whether the call inside it runs.
+//
+// This proves the real effect the wiring exists for: a pooled, idle
+// connection is actually torn down at shutdown, not merely announced. The
+// pricing client's default httpclient.Options keep it alive for 90s
+// (Task 2/3's IdleConnTimeout default), so nothing but an explicit
+// CloseIdleConnections call could close it this quickly.
+func TestAcceptanceShutdownActuallyClosesThePricingConnection(t *testing.T) {
+	var mu sync.Mutex
+	var closed bool
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"amount_minor":1}`)
+	}))
+	// ConnState must be set before Start, not after: the server begins
+	// serving inside Start, and setting it on a live *http.Server races
+	// with the server goroutine reading it on the next connection.
+	upstream.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			mu.Lock()
+			closed = true
+			mu.Unlock()
+		}
+	}
+	upstream.Start()
+	defer upstream.Close()
+
+	s := newStack(t, 0, upstream.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.lc.Run(ctx) }()
+	time.Sleep(50 * time.Millisecond)
+
+	// Put a connection in the pool.
+	if _, err := s.pricing.Quote(context.Background(), "SKU-1"); err != nil {
+		t.Fatalf("Quote: %v", err)
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		got := closed
+		mu.Unlock()
+		if got || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !closed {
+		t.Error("shutdown did not close the pricing client's pooled connection")
 	}
 }
