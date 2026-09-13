@@ -230,3 +230,37 @@ retired the synthesized-module machinery the exemplars used to need: with the
 workspace in scope they resolve their unpublished siblings natively, so no
 `replace` directives have to be injected into a committed `go.mod`. Proving
 each module stands alone is `ci.sh`'s job, and it still does it.
+
+## 10. Commit before you mutate; learnings land separately
+
+Git is a working tool here, not only a publishing step. Commit the change you
+want to improve, *then* run the mutation gate. Whatever the run teaches — a
+test that kills a survivor, an equivalent mutant with its argument written
+down — goes in as its own follow-up commit.
+
+Intermediate commits on a working branch are fine. A branch is a workspace;
+the PR boundary is where the story gets told, and `git rebase -i` exists for
+the gap between the two.
+
+Three independent reasons land on the same rule.
+
+**The gate cannot see uncommitted work.** §9's worktree is checked out at HEAD,
+so an edit you have not committed is not mutated. The script warns and lists
+the dirty files rather than reporting a score that quietly omits your change,
+but the warning scrolls past in a long run. Committing first is what makes the
+number mean what you think it means.
+
+**Uncommitted work is unprotected against this workflow's own commands.** The
+house standard for proving a guard is load-bearing is to break the
+implementation, watch the test fail, and restore it — and the restore is
+usually `git checkout -- <path>`, which discards every uncommitted edit in that
+file, not just the deliberate break. That has bitten this repo: the
+`lc.OnStarted(health.Up)` wiring was written, verified, and then destroyed by
+the `git checkout --` that ended its own break-it experiment. Committed first,
+the restore is exact and the experiment is free.
+
+**It separates the change from what testing taught about the change.** "Add
+`OnStarted`" and "kill the three survivors that exposed" are different claims,
+and a reviewer can accept one while questioning the other. Squashed together
+they read as a single confident step, which is the shape least likely to get
+the survivor argument actually checked.
