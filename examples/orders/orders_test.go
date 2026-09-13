@@ -3,8 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -240,4 +245,60 @@ func TestStoreGetIsSafeConcurrentlyWithClose(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+}
+
+func TestAcceptanceTheStackCallsPricingThroughTheClient(t *testing.T) {
+	var hits atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"amount_minor":1250}`)
+	}))
+	defer upstream.Close()
+
+	s := newStack(t, 0, upstream.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.lc.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	amount, err := s.pricing.Quote(context.Background(), "SKU-1")
+	if err != nil {
+		t.Fatalf("Quote: %v", err)
+	}
+	if amount != 1250 {
+		t.Errorf("amount = %d, want 1250", amount)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Errorf("upstream hits = %d, want 1", got)
+	}
+}
+
+// The client must be released at shutdown, and buildStack is where that wiring
+// lives so the mutation gate covers it. Dropping the lc.Add must fail this
+// test -- R1 shipped an OnServeError wiring that could be deleted with every
+// test still green, which is why this asserts rather than trusts.
+func TestAcceptanceShutdownReleasesThePricingClient(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"amount_minor":1}`)
+	}))
+	defer upstream.Close()
+
+	s := newStack(t, 0, upstream.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.lc.Run(ctx) }()
+
+	// Let startup finish, then shut down and wait for the unwind.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := s.snapshot(); !slices.Contains(got, "stop:pricing-client") {
+		t.Errorf("shutdown did not release the pricing client: ops = %v", got)
+	}
 }
