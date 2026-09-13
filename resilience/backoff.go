@@ -28,6 +28,7 @@ func Constant(d time.Duration) Backoff {
 // The doubling is guarded rather than computed and clamped: doubling a
 // time.Duration enough times overflows int64 and wraps negative, which would
 // turn a long backoff into no backoff at all.
+// If base is already greater than max, Exponential returns max for any attempt.
 func Exponential(base, max time.Duration) Backoff {
 	return func(attempt int) time.Duration {
 		if attempt < 1 {

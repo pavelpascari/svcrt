@@ -78,3 +78,15 @@ func TestJitterOfAZeroDelayIsZero(t *testing.T) {
 		t.Errorf("jitter of a zero delay = %v, want 0", got)
 	}
 }
+
+// base > max is not forbidden anywhere, and a caller who transposes the two
+// arguments should still get a sane delay rather than one that ignores max.
+func TestExponentialSaturatesWhenBaseAlreadyExceedsMax(t *testing.T) {
+	t.Parallel()
+	b := resilience.Exponential(2*time.Second, 500*time.Millisecond)
+	for _, attempt := range []int{1, 2, 5} {
+		if got := b(attempt); got != 500*time.Millisecond {
+			t.Errorf("attempt %d = %v, want 500ms (max), not the larger base", attempt, got)
+		}
+	}
+}
