@@ -421,3 +421,35 @@ func TestAcceptanceThePricingCallRetriesATransientFailure(t *testing.T) {
 		t.Errorf("upstream saw %d attempts, want 3 (two failures then a success)", got)
 	}
 }
+
+// TestAcceptanceThePricingCallGivesUpAfterMaxAttempts pins the policy's
+// MaxAttempts, not just that retry happens at all. The test above still
+// passes with MaxAttempts raised to 4 or more, since the upstream there
+// recovers on the third try and nothing after that is ever attempted -- a
+// mutation.sh run against the committed wiring found MaxAttempts: 3 -> 4
+// surviving for exactly that reason. Here the upstream never recovers, so
+// the exact number of attempts is the only thing that can distinguish the
+// policy's ceiling from a higher one.
+func TestAcceptanceThePricingCallGivesUpAfterMaxAttempts(t *testing.T) {
+	var attempts atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, "upstream never recovers")
+	}))
+	defer upstream.Close()
+
+	s := newStack(t, 0, upstream.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.lc.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	if _, err := s.pricing.Quote(context.Background(), "SKU-1"); err == nil {
+		t.Fatal("Quote succeeded against an upstream that always returns 503")
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Errorf("upstream saw %d attempts, want exactly 3 (MaxAttempts)", got)
+	}
+}
