@@ -2,6 +2,7 @@ package httpclient_test
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -129,5 +130,71 @@ func TestTransportHonoursTheProxyEnvironment(t *testing.T) {
 	}
 	if u == nil || u.Host != "egress.example:3128" {
 		t.Errorf("Proxy resolved to %v, want http://egress.example:3128", u)
+	}
+}
+
+// The module's central hygiene rule. http.DefaultTransport is a process-wide
+// singleton: a library that tunes it re-tunes every other user in the process,
+// including ones that never heard of this package. Stating the rule is not
+// enough -- a regression here is invisible at every call site, so it is
+// asserted.
+func TestNewDoesNotTouchTheProcessGlobals(t *testing.T) {
+	// Deliberately NOT t.Parallel: this test reads process-wide state, and a
+	// parallel sibling constructing clients would make it meaningless.
+	dt := http.DefaultTransport.(*http.Transport)
+	before := *dt // shallow copy of every exported field
+
+	c := httpclient.New(httpclient.Options{
+		MaxIdleConnsPerHost: 999,
+		IdleConnTimeout:     42 * time.Second,
+	})
+
+	after := *dt
+	if before.MaxIdleConnsPerHost != after.MaxIdleConnsPerHost ||
+		before.IdleConnTimeout != after.IdleConnTimeout ||
+		before.MaxIdleConns != after.MaxIdleConns ||
+		before.TLSHandshakeTimeout != after.TLSHandshakeTimeout ||
+		before.ResponseHeaderTimeout != after.ResponseHeaderTimeout ||
+		before.ExpectContinueTimeout != after.ExpectContinueTimeout {
+		t.Error("New mutated http.DefaultTransport; it must build a fresh one")
+	}
+
+	if c.Transport == http.DefaultTransport {
+		t.Error("New returned a client using http.DefaultTransport")
+	}
+	if c == http.DefaultClient {
+		t.Error("New returned http.DefaultClient")
+	}
+}
+
+// ForceAttemptHTTP2 is set because New supplies a DialContext, and
+// http.Transport only negotiates HTTP/2 automatically when Dial, DialContext
+// and TLSClientConfig are all nil. Asserting the field alone would prove the
+// value was set, not that HTTP/2 actually negotiates with a custom dialer in
+// play -- which is the thing that breaks. So this makes a real request.
+func TestHTTP2SurvivesTheCustomDialer(t *testing.T) {
+	t.Parallel()
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	ts.EnableHTTP2 = true
+	ts.StartTLS()
+	defer ts.Close()
+
+	c := httpclient.New(httpclient.Options{})
+	tr := transportOf(t, c)
+	// Trust the test server's certificate. Assigning TLSClientConfig is exactly
+	// the condition that would disable automatic HTTP/2, which is what makes
+	// this a real test of ForceAttemptHTTP2 rather than a formality.
+	tr.TLSClientConfig = ts.Client().Transport.(*http.Transport).TLSClientConfig
+
+	resp, err := c.Get(ts.URL)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.Proto != "HTTP/2.0" {
+		t.Errorf("resp.Proto = %q, want \"HTTP/2.0\" -- a custom DialContext disabled HTTP/2 silently", resp.Proto)
 	}
 }
