@@ -6,6 +6,7 @@ use (
 	./logging
 	./lifecycle
 	./httpserver
+	./httpclient
 	./examples/orders
 	./examples/worker
 )

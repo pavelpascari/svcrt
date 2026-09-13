@@ -3,8 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -240,4 +246,141 @@ func TestStoreGetIsSafeConcurrentlyWithClose(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+}
+
+func TestAcceptanceTheStackCallsPricingThroughTheClient(t *testing.T) {
+	var hits atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"amount_minor":1250}`)
+	}))
+	defer upstream.Close()
+
+	s := newStack(t, 0, upstream.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.lc.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	amount, err := s.pricing.Quote(context.Background(), "SKU-1")
+	if err != nil {
+		t.Fatalf("Quote: %v", err)
+	}
+	if amount != 1250 {
+		t.Errorf("amount = %d, want 1250", amount)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Errorf("upstream hits = %d, want 1", got)
+	}
+
+	// Pin WHICH client the stack built. Replacing httpclient.New(...) with
+	// &http.Client{} satisfies every assertion above -- while using
+	// http.DefaultTransport, the one thing httpclient exists to avoid. That
+	// mutant survived the whole suite at the R2 review. MaxIdleConnsPerHost
+	// is httpclient.New's headline deviation and both http.Transport and
+	// http.DefaultTransport leave it zero, so it identifies the constructor
+	// without the test having to reach for one.
+	tr, ok := s.pricing.http.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("pricing client transport is %T; the stack must build it with httpclient.New, not a bare &http.Client{} on http.DefaultTransport", s.pricing.http.Transport)
+	}
+	if tr.MaxIdleConnsPerHost != 100 {
+		t.Errorf("pricing transport MaxIdleConnsPerHost = %d, want 100; the stack must build the client with httpclient.New", tr.MaxIdleConnsPerHost)
+	}
+}
+
+// The client must be released at shutdown, and buildStack is where that wiring
+// lives so the mutation gate covers it. Dropping the lc.Add must fail this
+// test -- R1 shipped an OnServeError wiring that could be deleted with every
+// test still green, which is why this asserts rather than trusts.
+func TestAcceptanceShutdownReleasesThePricingClient(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"amount_minor":1}`)
+	}))
+	defer upstream.Close()
+
+	s := newStack(t, 0, upstream.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.lc.Run(ctx) }()
+
+	// Let startup finish, then shut down and wait for the unwind.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := s.snapshot(); !slices.Contains(got, "stop:pricing-client") {
+		t.Errorf("shutdown did not release the pricing client: ops = %v", got)
+	}
+}
+
+// TestAcceptanceShutdownActuallyClosesThePricingConnection goes one step
+// further than the trace check above: go-mutesting found that buildStack's
+// call to pricing.CloseIdleConnections() can be replaced with a discarded
+// method value -- compiling, never firing, and still leaving the
+// "stop:pricing-client" trace line in place, since that line is written by
+// the surrounding closure regardless of whether the call inside it runs.
+//
+// This proves the real effect the wiring exists for: a pooled, idle
+// connection is actually torn down at shutdown, not merely announced. The
+// pricing client's default httpclient.Options keep it alive for 90s
+// (Task 2/3's IdleConnTimeout default), so nothing but an explicit
+// CloseIdleConnections call could close it this quickly.
+func TestAcceptanceShutdownActuallyClosesThePricingConnection(t *testing.T) {
+	var mu sync.Mutex
+	var closed bool
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"amount_minor":1}`)
+	}))
+	// ConnState must be set before Start, not after: the server begins
+	// serving inside Start, and setting it on a live *http.Server races
+	// with the server goroutine reading it on the next connection.
+	upstream.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			mu.Lock()
+			closed = true
+			mu.Unlock()
+		}
+	}
+	upstream.Start()
+	defer upstream.Close()
+
+	s := newStack(t, 0, upstream.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.lc.Run(ctx) }()
+	time.Sleep(50 * time.Millisecond)
+
+	// Put a connection in the pool.
+	if _, err := s.pricing.Quote(context.Background(), "SKU-1"); err != nil {
+		t.Fatalf("Quote: %v", err)
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		got := closed
+		mu.Unlock()
+		if got || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !closed {
+		t.Error("shutdown did not close the pricing client's pooled connection")
+	}
 }

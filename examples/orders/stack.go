@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/pavelpascari/svcrt/httpclient"
 	"github.com/pavelpascari/svcrt/httpserver"
 	"github.com/pavelpascari/svcrt/lifecycle"
 )
@@ -16,10 +17,11 @@ import (
 // a missing After) fails in the test binary instead of only being visible in
 // a running process.
 type appStack struct {
-	lc     *lifecycle.Lifecycle
-	health *httpserver.Health
-	api    *httpserver.Server
-	admin  *httpserver.Server
+	lc      *lifecycle.Lifecycle
+	health  *httpserver.Health
+	api     *httpserver.Server
+	admin   *httpserver.Server
+	pricing *PricingClient
 }
 
 // appStackConfig carries the two things a test wiring must supply
@@ -37,6 +39,7 @@ type appStackConfig struct {
 	Handler    http.Handler
 	StoreOpen  lifecycle.StartFunc
 	StoreClose lifecycle.StopFunc
+	PricingURL string
 	Trace      func(op string)
 }
 
@@ -99,5 +102,14 @@ func buildStack(cfg appStackConfig) *appStack {
 		func(ctx context.Context) error { trace("stop:admin"); return admin.Shutdown(ctx) },
 		lifecycle.After(store))
 
-	return &appStack{lc: lc, health: health, api: api, admin: admin}
+	pricing := NewPricingClient(cfg.PricingURL, httpclient.New(httpclient.Options{}))
+	lc.Add("pricing-client",
+		func(context.Context) error { return nil },
+		func(context.Context) error {
+			trace("stop:pricing-client")
+			pricing.CloseIdleConnections()
+			return nil
+		})
+
+	return &appStack{lc: lc, health: health, api: api, admin: admin, pricing: pricing}
 }

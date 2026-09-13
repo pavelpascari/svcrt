@@ -86,20 +86,27 @@ of interop friction paid at every call site forever.
 
 ```go
 type Options struct {
-	DialTimeout           time.Duration // 0 -> 5s
-	TLSHandshakeTimeout   time.Duration // 0 -> 10s, matching http.DefaultTransport
-	ResponseHeaderTimeout time.Duration // 0 -> 10s  (stdlib leaves this unbounded)
-	IdleConnTimeout       time.Duration // 0 -> 90s, matching http.DefaultTransport
-	ExpectContinueTimeout time.Duration // 0 -> 1s,  matching http.DefaultTransport
-	MaxIdleConns          int           // 0 -> 100, matching http.DefaultTransport
-	MaxIdleConnsPerHost   int           // 0 -> 100  (stdlib effective default is 2)
-	Timeout               time.Duration // 0 -> none; see 3.3
+	DialTimeout           time.Duration // <=0 -> 5s  (stdlib default is 30s)
+	TLSHandshakeTimeout   time.Duration // <=0 -> 10s, matching http.DefaultTransport
+	ResponseHeaderTimeout time.Duration // <=0 -> 10s  (stdlib leaves this unbounded)
+	IdleConnTimeout       time.Duration // <=0 -> 90s, matching http.DefaultTransport
+	ExpectContinueTimeout time.Duration // <=0 -> 1s,  matching http.DefaultTransport
+	MaxIdleConns          int           // <=0 -> 100, matching http.DefaultTransport
+	MaxIdleConnsPerHost   int           // <=0 -> 100  (stdlib effective default is 2)
+	Timeout               time.Duration // 0 -> none; negative passes through unchanged; see 3.3
 	Middleware            Middleware
 }
 ```
 
+Every field above takes its default for a non-positive value, not only zero: a
+negative duration reaching `http.Transport` or `net.Dialer` unclamped means NO
+deadline at all to those types -- the opposite of what a caller setting a
+negative value could have intended. `Timeout` is the one exception, per §3.3:
+it has no default, so a negative value is passed through to
+`http.Client.Timeout` unchanged rather than clamped.
+
 Values were read off `http.DefaultTransport` at go1.25 rather than chosen, so
-that the only deviations are the two that are deliberate. Verified empirically,
+that the only deviations are the three that are deliberate. Verified empirically,
 not from memory:
 
 ```
@@ -110,6 +117,12 @@ DefaultTransport: MaxIdleConns=100 MaxIdleConnsPerHost=0 ForceAttemptHTTP2=true
 fresh &http.Transport{}: ForceAttemptHTTP2=false MaxIdleConnsPerHost=0
 ```
 
+**`DialTimeout` is the first deliberate deviation.** `http.DefaultTransport` uses
+30s; we use 5s. A TCP connect taking more than 5s means SYN retransmits — the
+dependency is effectively down — so fail fast to free the goroutine and preserve
+the caller's remaining deadline budget. A caller wanting the stdlib value sets
+the `Options` field.
+
 **`MaxIdleConnsPerHost` is the reason this module earns its place.**
 `http.Transport` leaves it 0, which means the package default of **2** — and
 `http.DefaultTransport` leaves it 0 as well, so the standard client has the same
@@ -119,13 +132,13 @@ pool that immediately discards it. It surfaces as latency and connection churn
 that nothing in the application explains, and almost nobody sets it. Raising it
 to match `MaxIdleConns` is most of this module's practical worth.
 
-**`ResponseHeaderTimeout` is the other deviation.** `DefaultTransport` leaves it
+**`ResponseHeaderTimeout` is the other major deviation.** `DefaultTransport` leaves it
 at zero, i.e. unbounded: a server that accepts a connection and never sends
 headers hangs the caller until its context expires, and a caller with no
 deadline hangs forever. §3.3 explains why this is the right timeout to default
 and a blanket one is not.
 
-### 3.2.1 `ForceAttemptHTTP2` must be set explicitly, or HTTP/2 silently disappears
+### 3.2.1 Two silent losses that a fresh transport suffers from `DefaultTransport`
 
 `http.Transport` enables HTTP/2 automatically only when `TLSClientConfig`,
 `Dial` and `DialContext` are all nil. This module sets `DialContext` to
@@ -140,6 +153,13 @@ its callers from writing. `New` sets `ForceAttemptHTTP2: true`.
 
 It is asserted in §6, because a downgrade that produces no error is invisible to
 every test that only checks the response.
+
+A fresh `http.Transport` also has `Proxy: nil`, so `HTTP_PROXY`, `HTTPS_PROXY`,
+and `NO_PROXY` environment variables are ignored completely. In an egress-
+controlled network, this silently bypasses a security control or breaks every
+request without error. This is the same failure mode as `ForceAttemptHTTP2`
+above — a fresh transport loses `DefaultTransport`'s behavior, here its proxy
+settings. `New` sets `Proxy: http.ProxyFromEnvironment`.
 
 ### 3.3 No blanket `Timeout` by default
 
