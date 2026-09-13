@@ -16,6 +16,25 @@ import (
 
 	"github.com/pavelpascari/svcrt/config"
 	"github.com/pavelpascari/svcrt/contract"
+	"github.com/pavelpascari/svcrt/httpclient"
+	"github.com/pavelpascari/svcrt/resilience"
+)
+
+// Spec §7 criterion 2, stated rather than implied: resilience's constructors
+// return the bare func(http.RoundTripper) http.RoundTripper, so their results
+// are assignable to httpclient.Middleware with neither module importing the
+// other. Two different NAMED types with identical underlying types are not
+// assignable in Go; one side must be unnamed, and resilience is that side
+// (conventions.md §2).
+//
+// buildStack already demonstrates this by passing resilience.Retry(...) into
+// httpclient.Chain(...), so the property was met in substance -- but as a
+// side effect of one call site, which disappears the day someone rewires the
+// pricing client. The exemplar is the only place that may import both, so
+// the check belongs here, in a line whose entire job is to fail to compile.
+var (
+	_ httpclient.Middleware = resilience.Retry(resilience.Policy{})
+	_ httpclient.Middleware = resilience.Timeout(time.Second)
 )
 
 func mapSource(m map[string]string) config.Source {
