@@ -955,3 +955,40 @@ func TestAPanickingRetryIfStillClosesTheResponse(t *testing.T) {
 		t.Error("the in-flight response was not drained; its connection will not be reused")
 	}
 }
+
+// Retry closes over the normalised policy for the life of the middleware, so
+// a RetryMethods slice retained by reference would let a caller change live
+// policy by appending to their own slice -- from whatever goroutine they
+// happen to be on, against a read on the request path. Retry copies it.
+func TestRetryMethodsIsCopiedNotRetained(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int64
+
+	methods := []string{http.MethodPost}
+	rt := resilience.Retry(resilience.Policy{
+		MaxAttempts:  3,
+		Backoff:      resilience.Constant(0),
+		RetryMethods: methods,
+	})(rtFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return respond(http.StatusServiceUnavailable), nil
+	}))
+
+	// The caller reuses their slice after constructing the middleware.
+	methods[0] = http.MethodDelete
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		"http://x.invalid/", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	resp.Body.Close()
+
+	if got := calls.Load(); got != 3 {
+		t.Errorf("attempts = %d, want 3 -- the policy followed the caller's slice after construction", got)
+	}
+}

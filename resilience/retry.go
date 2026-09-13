@@ -78,6 +78,12 @@ type Policy struct {
 	// RetryMethods are the HTTP methods eligible for retry. nil means the six
 	// idempotent ones. Set it explicitly to opt a POST in when the endpoint is
 	// idempotent by key.
+	//
+	// Retry copies this slice, so appending to your own afterwards changes
+	// nothing. That is deliberate: Retry closes over the policy for the life
+	// of the middleware, and a caller who appended to a retained slice would
+	// be writing to live policy from whatever goroutine they happened to be
+	// on, against a read on the request path.
 	RetryMethods []string
 
 	// RetryIf decides whether a result is worth retrying. nil means any
@@ -115,6 +121,11 @@ func (p Policy) withDefaults() Policy {
 	}
 	if p.RetryMethods == nil {
 		p.RetryMethods = defaultRetryMethods
+	} else {
+		// Copy rather than retain -- see the field's doc comment. The
+		// default needs no copy: it is package-level and unexported, so no
+		// caller has a reference to append to.
+		p.RetryMethods = slices.Clone(p.RetryMethods)
 	}
 	if p.RetryIf == nil {
 		p.RetryIf = defaultRetryIf
