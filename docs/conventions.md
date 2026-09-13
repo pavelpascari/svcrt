@@ -41,12 +41,13 @@ when an option must carry behaviour, when options are expected to be added by
 modules that do not exist yet, or when the zero value of some field would be a
 dangerous default that a struct literal lets a caller omit by accident.
 
-## 2. `Middleware` means three things, on purpose
+## 2. `Middleware` means four things, on purpose
 
 R0 declared two spellings of `Middleware` and warned a third would be one too
 many. R1 added the third anyway, deliberately, once `httpserver` needed a
-name for the shape the other two were already describing in prose. All three
-stand:
+name for the shape the other two were already describing in prose. R2 added a
+fourth, the client-side mirror of that third, once `httpclient` needed the
+same shape on `http.RoundTripper` instead of `http.Handler`. All four stand:
 
 - `contract.Middleware[Req, Res]` is a **generic type**: the call-level seam,
   `func(Handler[Req, Res]) Handler[Req, Res]`. It exists so hand-written and
@@ -58,6 +59,13 @@ stand:
   its own; it names the shape `logging.Middleware` (and every other
   transport-level constructor) builds, so `Chain` and its callers have
   something concrete to write down.
+- `httpclient.Middleware` is the client-side mirror of
+  `httpserver.Middleware`: `func(http.RoundTripper) http.RoundTripper`. It
+  shares `httpserver.Middleware`'s ordering (in `Chain`, the first argument
+  ends up outermost) and its empty-slice identity behaviour (`Chain()` with no
+  arguments returns a middleware that changes nothing), so the two `Chain`
+  functions read the same way even though one wraps a `Handler` and the other
+  a `RoundTripper`.
 
 The split is along the transport/call boundary, not along taste:
 
@@ -72,11 +80,18 @@ The split is along the transport/call boundary, not along taste:
   `func(http.Handler) http.Handler`). Name the constructor `Middleware` when
   the package has exactly one, as `logging` does, and name it for its job
   (`RecoverMiddleware`, `RequestIDMiddleware`) when it has several.
+- **Client-side transport middleware** — anything that wraps outgoing
+  requests instead of incoming ones — uses `httpclient.Middleware`'s shape,
+  `func(http.RoundTripper) http.RoundTripper`, for the same reason
+  `httpserver.Middleware` exists on the server side: something concrete for
+  `httpclient.Chain` and its callers to write down.
 
-So: one generic type for the call level, one plain type for the transport
-level, and as many constructors returning that plain type as there are
-transport-level concerns. A new module never declares a second transport-level
-`Middleware` type — it names its constructor and returns `httpserver.Middleware`.
+So: one generic type for the call level, one plain type for the server-side
+transport level, one plain type for the client-side transport level, and as
+many constructors returning the relevant plain type as there are
+transport-level concerns. A new module never declares a second
+call-level, server-side, or client-side `Middleware` type — it names its
+constructor and returns the existing one.
 
 ## 3. Dead code: when to delete a clause and when to keep and test it
 
