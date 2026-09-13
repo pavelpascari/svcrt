@@ -1,6 +1,6 @@
 # Mutation Test Survivors
 
-This document records mutants that survive the mutation testing threshold for each module. Modules with perfect coverage (all mutants killed) have no entry.
+This document records mutants that survive the mutation testing threshold for each module. A module whose mutants are all killed normally has no entry -- with one exception: a module that scores 1.000 gets an entry anyway when it carries a **wiring caveat** worth recording, i.e. a place where the perfect score is true and still does not mean what a reader would take it to mean. `httpclient` below is the worked example of that exception; the **1.000 is not "everything is covered"** paragraph below, on `httpserver`, is why the exception exists.
 
 **Mutant ids and checksums drift.** go-mutesting numbers mutants per file in
 generation order, so editing a file renumbers every mutant after the edit
@@ -11,7 +11,11 @@ mutant against its `.original`. Match entries by the **code they mutate**,
 which is quoted in every section, not by the id alone.
 
 `contract`, `httpserver`, and `examples/orders` all score 1.000 with no
-survivors, so none has an entry.
+survivors and no wiring caveat recorded here, so none has an entry --
+`httpserver`'s caveat is written up in the **1.000 is not "everything is
+covered"** paragraph instead, because it is the example the rule is built on.
+`httpclient` also scores 1.000 with no survivors and *does* have an entry,
+under the exception above.
 
 **1.000 is not "everything is covered."** go-mutesting does not mutate
 struct-literal field assignments, so a whole class of wiring bug is invisible
@@ -726,21 +730,28 @@ literal has no observer, not merely one the current tests happen to miss.
 
 ## `httpclient` Module
 
-**Mutation Score: 1.000, no survivors.** As with `httpserver`, that score
-does not mean every wiring is verified by mutation. `go-mutesting` does not
-mutate struct-literal field assignments, so `New`'s `Options` ->
-`http.Transport` copy -- `TLSHandshakeTimeout`, `ResponseHeaderTimeout`,
-`IdleConnTimeout`, `ExpectContinueTimeout`, `MaxIdleConns`,
-`MaxIdleConnsPerHost`, and `Options.Timeout` -> `Client.Timeout` -- is
-invisible to this gate no matter what the score says: a mutant that swapped,
+**Mutation Score: 1.000, no survivors** -- an entry under the preamble's
+exception, because the caveat is worth recording. As with the preamble's
+`httpserver` worked example, that score does not mean every wiring is verified
+by mutation. `go-mutesting` does not mutate struct-literal field assignments,
+so `New`'s `Options` -> `http.Transport` copy -- `TLSHandshakeTimeout`,
+`ResponseHeaderTimeout`, `IdleConnTimeout`, `ExpectContinueTimeout`,
+`MaxIdleConns`, `MaxIdleConnsPerHost`, `TLSClientConfig`, and
+`Options.Timeout` -> `Client.Timeout` -- is invisible to this gate no matter
+what the score says: a mutant that swapped,
 say, `IdleConnTimeout` and `ExpectContinueTimeout` on both sides of the
 assignment would compile and leave the score at 1.000. What actually covers
 that wiring is `TestEveryOptionLandsOnItsOwnDestination`
 (`httpclient/client_test.go`), which assigns every field a distinct value and
 asserts each lands on its own destination rather than merely a non-zero one.
-`DialTimeout` is not in that table -- it feeds `net.Dialer.Timeout` inside a
-`DialContext` closure rather than a field `New`'s caller can read back off
-the transport -- so its wiring rests on code inspection, not a test, same as
-today. Read a 1.000 here the same way as `httpserver`'s: "every mutant the
-tool generates is killed", not "every wiring is verified" -- the latter is
-this table's job, not go-mutesting's.
+`DialTimeout` is not in that table, because it feeds `net.Dialer.Timeout`
+inside a closure rather than a transport field. It used to rest on code
+inspection alone, and the R2 review confirmed the cost by running the mutants:
+zeroing the dial timeout, and swapping it with the keep-alive interval, both
+survived the full suite. `New` now builds that dialer through `newDialer`, and
+`TestDialerCarriesTheDialTimeoutAndKeepAlive`
+(`httpclient/client_internal_test.go`) reads both values back with a distinct
+value per field, so neither mutant survives any more. Read a 1.000 here the
+same way the preamble reads `httpserver`'s: "every mutant the tool generates is
+killed", not "every wiring is verified" -- the latter is this table's job, not
+go-mutesting's.
