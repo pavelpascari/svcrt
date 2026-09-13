@@ -36,6 +36,9 @@ type AppConfig struct {
 	// load balancer notices before the listener closes. Zero drops traffic
 	// that arrives in that window.
 	DrainDelay time.Duration `env:"DRAIN_DELAY" default:"5s"`
+
+	// PricingURL is the base URL of the upstream pricing service.
+	PricingURL string `env:"PRICING_URL" default:"http://localhost:9091"`
 }
 
 type OTelConfig struct {

@@ -723,3 +723,24 @@ including a `Stop` deadline deliberately placed close to the tick period --
 distinguishes `49ms`, `50ms`, and `51ms`, because no code path branches on
 elapsed ticks or measures the interval. Equivalent by construction: this
 literal has no observer, not merely one the current tests happen to miss.
+
+## `httpclient` Module
+
+**Mutation Score: 1.000, no survivors.** As with `httpserver`, that score
+does not mean every wiring is verified by mutation. `go-mutesting` does not
+mutate struct-literal field assignments, so `New`'s `Options` ->
+`http.Transport` copy -- `TLSHandshakeTimeout`, `ResponseHeaderTimeout`,
+`IdleConnTimeout`, `ExpectContinueTimeout`, `MaxIdleConns`,
+`MaxIdleConnsPerHost`, and `Options.Timeout` -> `Client.Timeout` -- is
+invisible to this gate no matter what the score says: a mutant that swapped,
+say, `IdleConnTimeout` and `ExpectContinueTimeout` on both sides of the
+assignment would compile and leave the score at 1.000. What actually covers
+that wiring is `TestEveryOptionLandsOnItsOwnDestination`
+(`httpclient/client_test.go`), which assigns every field a distinct value and
+asserts each lands on its own destination rather than merely a non-zero one.
+`DialTimeout` is not in that table -- it feeds `net.Dialer.Timeout` inside a
+`DialContext` closure rather than a field `New`'s caller can read back off
+the transport -- so its wiring rests on code inspection, not a test, same as
+today. Read a 1.000 here the same way as `httpserver`'s: "every mutant the
+tool generates is killed", not "every wiring is verified" -- the latter is
+this table's job, not go-mutesting's.

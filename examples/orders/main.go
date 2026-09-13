@@ -44,6 +44,7 @@ func main() {
 		Handler:    newServer(NewService(st), log),
 		StoreOpen:  st.Open,
 		StoreClose: st.Close,
+		PricingURL: cfg.PricingURL,
 	})
 
 	// Everything below this line is the genuinely untestable part: a real

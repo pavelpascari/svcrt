@@ -35,12 +35,13 @@ type stack struct {
 	health   *httpserver.Health
 	api      *httpserver.Server
 	admin    *httpserver.Server
+	pricing  *PricingClient
 	mu       sync.Mutex
 	ops      []string
 	slowGate chan struct{}
 }
 
-func newStack(t *testing.T, drainDelay time.Duration) *stack {
+func newStack(t *testing.T, drainDelay time.Duration, pricingURL string) *stack {
 	t.Helper()
 	s := &stack{slowGate: make(chan struct{})}
 
@@ -57,6 +58,7 @@ func newStack(t *testing.T, drainDelay time.Duration) *stack {
 		Handler:    mux,
 		StoreOpen:  func(context.Context) error { return nil },
 		StoreClose: func(context.Context) error { return nil },
+		PricingURL: pricingURL,
 		Trace: func(op string) {
 			s.mu.Lock()
 			s.ops = append(s.ops, op)
@@ -67,6 +69,7 @@ func newStack(t *testing.T, drainDelay time.Duration) *stack {
 	s.health = built.health
 	s.api = built.api
 	s.admin = built.admin
+	s.pricing = built.pricing
 
 	return s
 }
@@ -78,7 +81,7 @@ func (s *stack) snapshot() []string {
 }
 
 func TestAcceptanceStartsInDependencyOrder(t *testing.T) {
-	s := newStack(t, 0)
+	s := newStack(t, 0, "")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- s.lc.Run(ctx) }()
@@ -112,7 +115,7 @@ func TestAcceptanceStartsInDependencyOrder(t *testing.T) {
 // asserts that default directly, rather than the test priming it with its
 // own Set(true) calls first.
 func TestAcceptanceProbesAnswerAfterBoot(t *testing.T) {
-	s := newStack(t, 0)
+	s := newStack(t, 0, "")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- s.lc.Run(ctx) }()
@@ -133,7 +136,7 @@ func TestAcceptanceProbesAnswerAfterBoot(t *testing.T) {
 // THE acceptance criterion: readiness goes 503 before the API stops accepting,
 // and a request in flight when the signal arrives still completes.
 func TestAcceptanceDrainFlipsReadinessBeforeStoppingAndCompletesInFlight(t *testing.T) {
-	s := newStack(t, 300*time.Millisecond)
+	s := newStack(t, 300*time.Millisecond, "")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- s.lc.Run(ctx) }()
@@ -204,7 +207,7 @@ func TestAcceptanceDrainFlipsReadinessBeforeStoppingAndCompletesInFlight(t *test
 }
 
 func TestAcceptanceFatalTriggersTheSameDrain(t *testing.T) {
-	s := newStack(t, 0)
+	s := newStack(t, 0, "")
 	done := make(chan error, 1)
 	go func() { done <- s.lc.Run(context.Background()) }()
 	time.Sleep(100 * time.Millisecond)
@@ -278,7 +281,7 @@ func TestAcceptanceADeadListenerTriggersAnOrderedShutdown(t *testing.T) {
 		{"admin", func(s *stack) *httpserver.Server { return s.admin }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newStack(t, 0)
+			s := newStack(t, 0, "")
 			done := make(chan error, 1)
 			go func() { done <- s.lc.Run(context.Background()) }()
 			time.Sleep(100 * time.Millisecond)
