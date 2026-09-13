@@ -1,6 +1,7 @@
 package httpclient
 
 import (
+	"crypto/tls"
 	"net"
 	"net/http"
 	"time"
@@ -9,7 +10,10 @@ import (
 // Defaults applied to a zero-valued Options field.
 //
 // Every value except the three noted below is http.DefaultTransport's own, read
-// off go1.25 rather than chosen, so that the only deviations are deliberate.
+// off go1.26 rather than chosen, so that the only deviations are deliberate.
+// TestSharedDefaultsStillMatchTheStdlib re-derives the four shared values from
+// http.DefaultTransport on every run, so a stdlib change fails a test here
+// instead of rotting this sentence.
 const (
 	// Deviation 1. http.DefaultTransport uses 30s; we use 5s. A TCP connect
 	// needing more than 5s means SYN retransmits — the dependency is effectively
@@ -54,6 +58,13 @@ type Options struct {
 	// you know no response body is long-lived.
 	Timeout time.Duration
 
+	// TLSClientConfig is handed to the transport as-is. It exists because
+	// the alternative route to it -- asserting c.Transport to
+	// *http.Transport after New returns -- is the path that breaks the
+	// moment Middleware is set, so an mTLS or custom-CA caller would be
+	// choosing between TLS and middleware. nil keeps the stdlib default.
+	TLSClientConfig *tls.Config
+
 	// Middleware wraps the transport. Chain folds several into one.
 	Middleware Middleware
 }
@@ -72,13 +83,16 @@ type Options struct {
 //
 // The client owns no lifecycle, so there is nothing to close. To release idle
 // connections at shutdown, register c.CloseIdleConnections with your
-// lifecycle; examples/orders shows the wiring.
+// lifecycle; examples/orders shows the wiring. That recipe holds with
+// Middleware set: New forwards CloseIdleConnections through the wrapper, which
+// http.Client would otherwise drop on the floor without an error.
+//
+// For mTLS or a custom CA, set Options.TLSClientConfig rather than reaching
+// through c.Transport: the assertion to *http.Transport fails under
+// Middleware, and failing that way costs you TLS verification silently.
 func New(opts Options) *http.Client {
 	tr := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   orDuration(opts.DialTimeout, defaultDialTimeout),
-			KeepAlive: defaultKeepAlive,
-		}).DialContext,
+		DialContext: newDialer(opts).DialContext,
 
 		// Setting DialContext above disables http.Transport's automatic HTTP/2,
 		// which it only applies when Dial, DialContext and TLSClientConfig are
@@ -101,15 +115,49 @@ func New(opts Options) *http.Client {
 		ExpectContinueTimeout: orDuration(opts.ExpectContinueTimeout, defaultExpectContinueTimeout),
 		MaxIdleConns:          orInt(opts.MaxIdleConns, defaultMaxIdleConns),
 		MaxIdleConnsPerHost:   orInt(opts.MaxIdleConnsPerHost, defaultMaxIdleConnsPerHost),
+		TLSClientConfig:       opts.TLSClientConfig,
 	}
 
 	var rt http.RoundTripper = tr
 	if opts.Middleware != nil {
-		rt = opts.Middleware(rt)
+		rt = forwardingRoundTripper{RoundTripper: opts.Middleware(rt), tr: tr}
 	}
 
 	return &http.Client{Transport: rt, Timeout: opts.Timeout}
 }
+
+// newDialer builds the dialer New installs as DialContext.
+//
+// Extracted so the two values inside it can be read back and asserted. Inlined
+// in the Transport literal they were reachable from no test at all: the
+// closure is only observable by dialing, and Options.DialTimeout could be
+// unwired entirely -- or crossed with the keep-alive interval -- with the
+// whole suite still green. Found at the R2 review.
+func newDialer(opts Options) *net.Dialer {
+	return &net.Dialer{
+		Timeout:   orDuration(opts.DialTimeout, defaultDialTimeout),
+		KeepAlive: defaultKeepAlive,
+	}
+}
+
+// forwardingRoundTripper keeps CloseIdleConnections reachable through
+// middleware.
+//
+// http.Client.CloseIdleConnections type-asserts c.Transport to
+// interface{ CloseIdleConnections() } and does nothing at all when the
+// assertion fails. RoundTripperFunc -- the canonical middleware wrapper, and
+// the one this package exports -- has no such method, so without this type
+// setting Options.Middleware would silently turn the shutdown recipe above
+// into a no-op: no error, no log line, no compile failure, just idle sockets
+// held for IdleConnTimeout past every rolling deploy. Same silent-loss shape
+// as ForceAttemptHTTP2 and Proxy, one level up.
+type forwardingRoundTripper struct {
+	http.RoundTripper
+	tr *http.Transport
+}
+
+// CloseIdleConnections forwards to the transport New built.
+func (f forwardingRoundTripper) CloseIdleConnections() { f.tr.CloseIdleConnections() }
 
 func orDuration(v, d time.Duration) time.Duration {
 	if v == 0 {
