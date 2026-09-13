@@ -16,8 +16,6 @@ import (
 // names are part of the interface rather than free-form text (12-factor XI,
 // amended).
 const (
-	KeyTraceID = "trace_id"
-	KeySpanID  = "span_id"
 	KeyMethod  = "method"
 	KeyRoute   = "route"
 	KeyStatus  = "status"

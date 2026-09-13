@@ -17,6 +17,10 @@ import (
 
 type ctxKey struct{}
 
+// "trace_id" here is just a representative attribute name. This file tests
+// that an Extractor's attrs reach the record, not that any particular key is
+// spelled a given way -- the key belongs to whichever module emits it.
+
 // traceExtractor stands in for the one svcrt/telemetry will ship at R3.
 func traceExtractor() logging.Extractor {
 	return func(ctx context.Context) []slog.Attr {
@@ -24,7 +28,7 @@ func traceExtractor() logging.Extractor {
 		if !ok {
 			return nil
 		}
-		return []slog.Attr{slog.String(logging.KeyTraceID, id)}
+		return []slog.Attr{slog.String("trace_id", id)}
 	}
 }
 
@@ -74,8 +78,8 @@ func TestExtractorAddsAttrsFromContext(t *testing.T) {
 	log.InfoContext(ctx, "hello")
 
 	got := lines()
-	if got[0][logging.KeyTraceID] != "abc123" {
-		t.Errorf("%s = %v, want abc123", logging.KeyTraceID, got[0][logging.KeyTraceID])
+	if got[0]["trace_id"] != "abc123" {
+		t.Errorf("%s = %v, want abc123", "trace_id", got[0]["trace_id"])
 	}
 }
 
@@ -85,8 +89,8 @@ func TestExtractorContributesNothingWhenContextIsBare(t *testing.T) {
 	log, lines := capture(t, traceExtractor())
 	log.Info("hello")
 
-	if _, ok := lines()[0][logging.KeyTraceID]; ok {
-		t.Errorf("%s present with no value in context", logging.KeyTraceID)
+	if _, ok := lines()[0]["trace_id"]; ok {
+		t.Errorf("%s present with no value in context", "trace_id")
 	}
 }
 
@@ -98,9 +102,9 @@ func TestExtractorRunsPerRecordNotOnce(t *testing.T) {
 	log.InfoContext(context.WithValue(context.Background(), ctxKey{}, "two"), "b")
 
 	got := lines()
-	if got[0][logging.KeyTraceID] != "one" || got[1][logging.KeyTraceID] != "two" {
+	if got[0]["trace_id"] != "one" || got[1]["trace_id"] != "two" {
 		t.Errorf("trace ids = %v, %v; want one, two",
-			got[0][logging.KeyTraceID], got[1][logging.KeyTraceID])
+			got[0]["trace_id"], got[1]["trace_id"])
 	}
 }
 
@@ -204,12 +208,12 @@ func TestExtractorAttrsStayTopLevelAboveGroup(t *testing.T) {
 	grouped.InfoContext(ctx, "hello")
 
 	got := lines()[0]
-	if got[logging.KeyTraceID] != "abc123" {
-		t.Errorf("%s = %v, want abc123 at top level", logging.KeyTraceID, got[logging.KeyTraceID])
+	if got["trace_id"] != "abc123" {
+		t.Errorf("%s = %v, want abc123 at top level", "trace_id", got["trace_id"])
 	}
 	if req, ok := got["req"].(map[string]any); ok {
-		if _, nested := req[logging.KeyTraceID]; nested {
-			t.Errorf("%s leaked into the req group: %v", logging.KeyTraceID, req)
+		if _, nested := req["trace_id"]; nested {
+			t.Errorf("%s leaked into the req group: %v", "trace_id", req)
 		}
 	}
 }
@@ -303,13 +307,13 @@ func TestFastPathAddsExtractorAttrsAfterRecordOwnAttrs(t *testing.T) {
 
 	line := buf.String()
 	xi := strings.Index(line, `"x"`)
-	ti := strings.Index(line, `"`+logging.KeyTraceID+`"`)
+	ti := strings.Index(line, `"`+"trace_id"+`"`)
 	if xi < 0 || ti < 0 {
-		t.Fatalf(`expected both "x" and %q in output: %s`, logging.KeyTraceID, line)
+		t.Fatalf(`expected both "x" and %q in output: %s`, "trace_id", line)
 	}
 	if ti < xi {
 		t.Errorf("%s appeared before the call's own attrs on the fast path (no groups, no With); got: %s",
-			logging.KeyTraceID, line)
+			"trace_id", line)
 	}
 }
 
@@ -477,15 +481,15 @@ func TestExtractorAttrsStayTopLevelUnderWithGroup(t *testing.T) {
 	got := lines()[0]
 
 	// The correlation key must be findable by name at the top level.
-	if got[logging.KeyTraceID] != "abc123" {
-		t.Errorf("top-level %s = %v, want abc123", logging.KeyTraceID, got[logging.KeyTraceID])
+	if got["trace_id"] != "abc123" {
+		t.Errorf("top-level %s = %v, want abc123", "trace_id", got["trace_id"])
 	}
 	group, ok := got["req"].(map[string]any)
 	if !ok {
 		t.Fatalf("req = %#v, want a group object", got["req"])
 	}
-	if _, nested := group[logging.KeyTraceID]; nested {
-		t.Errorf("%s was nested inside the group: %#v", logging.KeyTraceID, group)
+	if _, nested := group["trace_id"]; nested {
+		t.Errorf("%s was nested inside the group: %#v", "trace_id", group)
 	}
 	if group["path"] != "/x" {
 		t.Errorf("req.path = %v, want /x", group["path"])
@@ -501,8 +505,8 @@ func TestExtractorAttrsStayTopLevelUnderNestedGroups(t *testing.T) {
 	log.WithGroup("a").WithGroup("b").InfoContext(ctx, "hello", "k", "v")
 
 	got := lines()[0]
-	if got[logging.KeyTraceID] != "abc123" {
-		t.Errorf("top-level %s missing: %#v", logging.KeyTraceID, got)
+	if got["trace_id"] != "abc123" {
+		t.Errorf("top-level %s missing: %#v", "trace_id", got)
 	}
 	a, ok := got["a"].(map[string]any)
 	if !ok {
@@ -515,11 +519,11 @@ func TestExtractorAttrsStayTopLevelUnderNestedGroups(t *testing.T) {
 	if b["k"] != "v" {
 		t.Errorf("a.b.k = %v, want v", b["k"])
 	}
-	if _, nested := a[logging.KeyTraceID]; nested {
-		t.Errorf("%s leaked into the a group: %#v", logging.KeyTraceID, a)
+	if _, nested := a["trace_id"]; nested {
+		t.Errorf("%s leaked into the a group: %#v", "trace_id", a)
 	}
-	if _, nested := b[logging.KeyTraceID]; nested {
-		t.Errorf("%s leaked into the a.b group: %#v", logging.KeyTraceID, b)
+	if _, nested := b["trace_id"]; nested {
+		t.Errorf("%s leaked into the a.b group: %#v", "trace_id", b)
 	}
 }
 
@@ -532,8 +536,8 @@ func TestWithAttrsBeforeGroupStillPlacesExtractorAtTopLevel(t *testing.T) {
 	log.With("service", "orders").WithGroup("req").InfoContext(ctx, "hello", "path", "/x")
 
 	got := lines()[0]
-	if got[logging.KeyTraceID] != "abc123" {
-		t.Errorf("top-level %s missing: %#v", logging.KeyTraceID, got)
+	if got["trace_id"] != "abc123" {
+		t.Errorf("top-level %s missing: %#v", "trace_id", got)
 	}
 	if got["service"] != "orders" {
 		t.Errorf("service = %v, want orders", got["service"])
@@ -542,8 +546,8 @@ func TestWithAttrsBeforeGroupStillPlacesExtractorAtTopLevel(t *testing.T) {
 	if !ok {
 		t.Fatalf("req = %#v, want a group", got["req"])
 	}
-	if _, nested := req[logging.KeyTraceID]; nested {
-		t.Errorf("%s leaked into the req group: %#v", logging.KeyTraceID, req)
+	if _, nested := req["trace_id"]; nested {
+		t.Errorf("%s leaked into the req group: %#v", "trace_id", req)
 	}
 }
 
