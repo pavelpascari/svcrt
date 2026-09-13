@@ -27,6 +27,22 @@ func Timeout(d time.Duration) func(http.RoundTripper) http.RoundTripper {
 				return nil, err
 			}
 
+			// A RoundTripper may return a non-nil response with a nil Body.
+			// http.RoundTripper's contract does not forbid it and drain
+			// already guards for it (retry.go), so it is a case this module
+			// treats as reachable. Wrapping it unconditionally would turn a
+			// nil Body into a NON-nil io.ReadCloser holding a nil interface:
+			// Close panics, and every downstream `resp.Body == nil` check --
+			// including drain's -- goes blind, so Retry(Timeout(...)) panics
+			// inside the one place that defends against this.
+			//
+			// http.NoBody is non-nil, always EOF, always a nil error, so
+			// drain reads zero bytes and closes cleanly, and cancel still
+			// fires on Close rather than leaking until d elapses.
+			if resp.Body == nil {
+				resp.Body = http.NoBody
+			}
+
 			// Deliberately NOT `defer cancel()`. The response body is read
 			// after this function returns, and cancelling the context closes
 			// it -- every successful response would come back unreadable.

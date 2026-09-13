@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -105,5 +106,69 @@ func TestTimeoutClosingTheBodyCancelsTheContext(t *testing.T) {
 
 	if !errors.Is(captured.Err(), context.Canceled) {
 		t.Errorf("context.Err() after Close = %v, want context.Canceled -- Close must release the timeout's cancel", captured.Err())
+	}
+}
+
+// A response with no Body at all -- a 204, or any hand-written RoundTripper
+// that does not bother to set one. http.RoundTripper's contract permits it,
+// and drain guards for it, so Timeout must not be the thing that turns a nil
+// Body into a non-nil wrapper around nil. Closing the returned body used to
+// panic here.
+func TestTimeoutToleratesAResponseWithNoBody(t *testing.T) {
+	t.Parallel()
+	var captured context.Context
+	rt := resilience.Timeout(5 * time.Second)(rtFunc(func(r *http.Request) (*http.Response, error) {
+		captured = r.Context()
+		return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header)}, nil
+	}))
+
+	resp, err := rt.RoundTrip(get(t))
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	if resp.Body == nil {
+		t.Fatal("Timeout returned a nil Body; it must substitute http.NoBody so callers and drain can Close it")
+	}
+
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading a bodyless response: %v", err)
+	}
+	if len(b) != 0 {
+		t.Errorf("read %q from a bodyless response, want nothing", b)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("closing a bodyless response: %v", err)
+	}
+
+	// The substitution must not cost the cancel: ownership still passes to
+	// the body, so Close still releases the timeout context.
+	if !errors.Is(captured.Err(), context.Canceled) {
+		t.Errorf("context.Err() after Close = %v, want context.Canceled", captured.Err())
+	}
+}
+
+// The composition is where the nil Body actually bit: Retry discards the 503
+// and calls drain, whose `resp.Body == nil` guard sees Timeout's wrapper
+// instead of the nil it is looking for, and the panic lands inside the guard.
+func TestRetryOverTimeoutToleratesAResponseWithNoBody(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int64
+	rt := resilience.Retry(resilience.Policy{
+		MaxAttempts: 3,
+		Backoff:     resilience.Constant(0),
+	})(resilience.Timeout(5 * time.Second)(rtFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header)}, nil
+	})))
+
+	resp, err := rt.RoundTrip(get(t))
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got := calls.Load(); got != 3 {
+		t.Errorf("attempts = %d, want 3", got)
 	}
 }
