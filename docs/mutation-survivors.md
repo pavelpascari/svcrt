@@ -730,12 +730,19 @@ literal has no observer, not merely one the current tests happen to miss.
 
 ## `resilience` Module
 
-**Mutation Score: above threshold, with 7 surviving mutants -- all 7 verified
+**Mutation Score: above threshold, with 5 surviving mutants -- all 5 verified
 equivalent, justified below.** As of the Task 4 fix wave (Retry-After and
-Timeout) those are `backoff.go.10`, `backoff.go.11`, `backoff.go.17`,
-`retryafter.go.1`, `retryafter.go.4`, `retryafter.go.10` and
-`retryafter.go.24`. Run `./scripts/mutation.sh resilience` for the current
-score and mutant total.
+Timeout) those are `backoff.go.11`, `retryafter.go.1`, `retryafter.go.4`,
+`retryafter.go.10` and `retryafter.go.24`. Run `./scripts/mutation.sh
+resilience` for the current score and mutant total.
+
+**Two mutants were initially misclassified as equivalent here and are not
+anymore: `backoff.go.10` and `backoff.go.17`.** See the correction below --
+they are real, non-equivalent mutants killed by
+`TestExponentialSaturationAtExactlyHalfAnOddMaxStillReturnsMax`, kept in this
+file as a record of the wrong argument and why it was wrong, per this file's
+own preamble ("An equivalence proof is a reason to look harder, not a reason
+to stop").
 
 The module's first mutation run (also Task 4, since no earlier task in this
 milestone ran the gate on `resilience`) came back at 0.63 against a 0.85
@@ -764,7 +771,7 @@ both were fixed rather than justified:
   remaining time equal to the requested delay -- is not constructible from
   two independent `time.Now()` calls; see its doc comment.
 
-### `backoff.go`: `Exponential`'s saturation check, `d >= max/2` (`>=` -> `>`, and the divisor `2` -> `1`)
+### `backoff.go`: `Exponential`'s saturation check, `d >= max/2` -- CORRECTION, not equivalent
 
 ```go
 for i := 1; i < attempt; i++ {
@@ -779,42 +786,46 @@ if d > max {
 return d
 ```
 
-Mutants: `backoff.go.10` changes `>=` to `>`; `backoff.go.17` changes the
-divisor from `2` to `1` (i.e. the threshold becomes `max` instead of
-`max/2`).
+Mutants: `backoff.go.10` (`>=` -> `>`) and `backoff.go.17` (divisor `2` ->
+`1`, i.e. the threshold becomes `max` instead of `max/2`) were originally
+recorded here as equivalent. **That was wrong**, caught by review, and is
+recorded rather than silently deleted -- this file's own preamble says an
+equivalence proof is a reason to look harder, not a reason to stop, and that
+applies to a proof already written down as much as to a fresh survivor.
 
-Both survive for the same reason: doubling never *decreases* a value, so any
-`d` that satisfies "the loop should stop and saturate" under the original
-threshold also satisfies it, at the latest, one doubling later -- and the
-function's own final clamp (`if d > max { return max }`) is what absorbs
-that one-iteration delay.
+The original argument reasoned algebraically: whenever `d >= max/2`, doubling
+once more gives `2*d >= max`, so the mutant's delayed return (or the
+function's final clamp, if no loop iteration remains) always lands on the
+same numeric `max`. **That step is false for an odd `max`.** Integer division
+truncates: `743/2` is `371`, not `371.5`, so `2 * (max/2)` is `742`, not
+`743`. The argument implicitly assumed `max/2` was exact -- true for every
+even `max`, false for every odd one -- and every `base`/`max` pair tried
+before accepting the equivalence (100ms/900ms, 100ms/1000ms, 1ns/2^62ns)
+happened to use an even `max`, so the flaw never showed up.
 
-Concretely: whenever `d >= max/2` (the real threshold), doubling once more
-gives `2*d >= max`. If a further loop iteration exists, the mutant's own
-(weaker) check fires on that iteration and returns `max`, matching the
-original. If no further iteration exists -- the loop's `attempt` bound was
-reached on the very iteration the original would have returned early -- the
-loop still executes `d *= 2` for that iteration before exiting, so `d`
-becomes `2*d_before >= max`. The final `if d > max { return max }` then
-returns `max` whenever `2*d_before > max`, and in the one edge case where
-`2*d_before == max` exactly, the function falls into `return d`, which is
-numerically `max` anyway. Every reachable path produces the identical
-`time.Duration` value. Verified by direct calculation across the boundary
-attempt for representative `base`/`max` pairs (100ms/900ms, 100ms/1000ms,
-1ns/2^62ns) before accepting this -- in every case the two programs compute
-the same output, not merely the same output on the cases tried.
+Concretely, with `base=371ns, max=743ns`, at attempt 2: `d=371` (`==
+max/2`, exactly the boundary). The original's `>=` check fires, returning
+`max=743`. The mutant's `>` check (`371 > 371` is false) and the
+divisor-`1` mutant's check (`371 >= 743` is false) both fail to fire, so `d`
+doubles to `742` instead, the loop ends (no more iterations), and the final
+clamp (`742 > 743` is false) returns `742` -- not `743`. Confirmed by brute
+force across `base` 1-50 and `max` 1-2000 for both mutants (307 mismatches
+each) before writing this correction; `backoff.go.11` (the final clamp's
+`>=`, see below) was checked the same way and had zero mismatches across the
+same range, so it is not affected by this flaw.
 
-This is a genuinely different argument from `backoff.go.2` (`max/2` ->
-`max*2`), which is NOT equivalent and is killed directly by
-`TestExponentialGuardDoesNotOverflowForAMaxNearInt64Max`: for a `max` near
-`1<<63`, computing `max*2` overflows and wraps negative, making the
-mutant's check spuriously true on the very first attempt -- a real,
-observable bug that the "doubling only grows `d`" argument above does not
-cover, because the argument assumes `max*2` doesn't overflow. The
-in-between mutant `backoff.go.25` (`max/2` -> `max/3`, a *smaller* threshold
-that fires *before* the guarantee "one more doubling reaches max" holds) is
-likewise not equivalent, and is killed by
-`TestExponentialSaturationBoundaryIsHalfMaxNotAnyOtherFraction`.
+Both mutants are now killed by
+`TestExponentialSaturationAtExactlyHalfAnOddMaxStillReturnsMax`
+(`backoff_test.go`), which deliberately uses an odd `max` so `max/2`
+truncates -- a round `max` would silently re-open this hole, which is why
+the test's own comment says so.
+
+This correction does not touch the surrounding mutants' verdicts:
+`backoff.go.2` (`max/2` -> `max*2`, killed by
+`TestExponentialGuardDoesNotOverflowForAMaxNearInt64Max`) and `backoff.go.25`
+(`max/2` -> `max/3`, killed by
+`TestExponentialSaturationBoundaryIsHalfMaxNotAnyOtherFraction`) were never
+equivalence claims -- both were already recorded as real, killed mutants.
 
 ### `backoff.go`: `Exponential`'s final clamp, `d > max` (`>` -> `>=`)
 

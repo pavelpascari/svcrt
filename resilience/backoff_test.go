@@ -148,6 +148,24 @@ func TestExponentialSaturationBoundaryIsHalfMaxNotAnyOtherFraction(t *testing.T)
 	}
 }
 
+// The saturation check's ">=" and its divisor "2" both matter independently
+// of TestExponentialSaturationBoundaryIsHalfMaxNotAnyOtherFraction above,
+// and only show up for an ODD max: max/2 truncates, so 2*(max/2) != max.
+// Here max=743 is odd, so max/2 truncates to 371. At attempt 2, d=371
+// (== max/2 exactly) must saturate to max=743 via the ">=" branch --
+// relaxing ">=" to ">", or widening the divisor from 2 to 1 (checking
+// against max itself instead of max/2), both skip that early return, let d
+// double once more to 742, and the final clamp (742 is not > 743) then
+// returns 742 instead of 743. Deliberately not a round number: a round max
+// makes max/2 exact and hides both mutants.
+func TestExponentialSaturationAtExactlyHalfAnOddMaxStillReturnsMax(t *testing.T) {
+	t.Parallel()
+	b := resilience.Exponential(371*time.Nanosecond, 743*time.Nanosecond)
+	if got := b(2); got != 743*time.Nanosecond {
+		t.Errorf("attempt 2 = %v, want 743ns (max) -- d reached max/2 exactly (743/2 truncates to 371) and must saturate", got)
+	}
+}
+
 // Doubling a time.Duration close to the top of int64 must not be allowed to
 // overflow while deciding whether to saturate. The guard computes max/2
 // (safe, no overflow risk) rather than comparing against 2*d or max*2 (which
