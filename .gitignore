@@ -8,3 +8,7 @@ examples/*/*
 !examples/*/*.go
 !examples/*/go.mod
 !examples/*/go.sum
+
+# Test coverage artifacts
+coverage.out
+coverage.html
