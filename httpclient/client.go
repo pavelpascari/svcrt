@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// Defaults applied to a zero-valued Options field.
+// Defaults applied to a non-positive Options field.
 //
 // Every value except the three noted below is http.DefaultTransport's own, read
 // off go1.26 rather than chosen, so that the only deviations are deliberate.
@@ -41,7 +41,12 @@ const (
 	defaultMaxIdleConnsPerHost = 100
 )
 
-// Options configures New. Every zero-valued field takes the documented default.
+// Options configures New. Every non-positive value -- zero or negative --
+// takes the documented default, for every field except Timeout: a negative
+// duration reaching http.Transport or net.Dialer unclamped means NO deadline
+// at all to those types, the opposite of what a caller setting a negative
+// value could have intended, so it is treated the same as unset rather than
+// passed through. Timeout is the one exception; see its own doc comment.
 type Options struct {
 	DialTimeout           time.Duration
 	TLSHandshakeTimeout   time.Duration
@@ -56,6 +61,11 @@ type Options struct {
 	// streaming, SSE, long polling and large downloads at an arbitrary
 	// boundary. Prefer a deadline on the request context. Set this only when
 	// you know no response body is long-lived.
+	//
+	// Unlike every other field above, a non-positive value here is NOT
+	// clamped: zero deliberately means "no blanket timeout" (spec 3.3), and a
+	// negative value is passed through to http.Client.Timeout unchanged for
+	// the same reason -- there is no default to fall back to.
 	Timeout time.Duration
 
 	// TLSClientConfig is handed to the transport as-is. It exists because
@@ -159,15 +169,27 @@ type forwardingRoundTripper struct {
 // CloseIdleConnections forwards to the transport New built.
 func (f forwardingRoundTripper) CloseIdleConnections() { f.tr.CloseIdleConnections() }
 
+// orDuration returns d unless v is strictly positive. A non-positive v is
+// clamped to the default rather than only a zero one: both http.Transport and
+// net.Dialer treat a non-positive timeout as no deadline at all, so passing a
+// negative value through would silently mean the opposite of what the caller
+// asked for -- precisely the failure DialTimeout's Deviation 1 exists to
+// prevent. Not used for Options.Timeout, which has no default; see its doc
+// comment.
 func orDuration(v, d time.Duration) time.Duration {
-	if v == 0 {
+	if v <= 0 {
 		return d
 	}
 	return v
 }
 
+// orInt returns d unless v is strictly positive, for the same reason
+// orDuration clamps negatives: MaxIdleConns and MaxIdleConnsPerHost are
+// counts, and net/http treats a non-positive value as "no limit" rather than
+// "unset", so a negative Options value would silently disable pooling instead
+// of taking its default.
 func orInt(v, d int) int {
-	if v == 0 {
+	if v <= 0 {
 		return d
 	}
 	return v

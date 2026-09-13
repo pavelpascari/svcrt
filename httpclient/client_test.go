@@ -128,6 +128,55 @@ func TestZeroOptionsProduceTheDocumentedDefaults(t *testing.T) {
 	}
 }
 
+// TestNegativeOptionsProduceTheDocumentedDefaults covers the finding that a
+// negative duration reaches http.Transport/net.Dialer unclamped: both treat a
+// non-positive timeout as NO deadline at all, which is the opposite of what
+// the caller asked for. Every field here gets a DISTINCT negative value, same
+// reasoning as TestEveryOptionLandsOnItsOwnDestination -- a shared value would
+// pass even if a field's clamp were wired to the wrong destination.
+func TestNegativeOptionsProduceTheDocumentedDefaults(t *testing.T) {
+	t.Parallel()
+	c := httpclient.New(httpclient.Options{
+		TLSHandshakeTimeout:   -1 * time.Second,
+		ResponseHeaderTimeout: -2 * time.Second,
+		IdleConnTimeout:       -3 * time.Second,
+		ExpectContinueTimeout: -4 * time.Second,
+		MaxIdleConns:          -5,
+		MaxIdleConnsPerHost:   -6,
+	})
+	tr := transportOf(t, c)
+
+	for _, tc := range []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"TLSHandshakeTimeout", tr.TLSHandshakeTimeout, 10 * time.Second},
+		{"ResponseHeaderTimeout", tr.ResponseHeaderTimeout, 10 * time.Second},
+		{"IdleConnTimeout", tr.IdleConnTimeout, 90 * time.Second},
+		{"ExpectContinueTimeout", tr.ExpectContinueTimeout, 1 * time.Second},
+		{"MaxIdleConns", tr.MaxIdleConns, 100},
+		{"MaxIdleConnsPerHost", tr.MaxIdleConnsPerHost, 100},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %v, want documented default %v", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
+// TestNegativeTimeoutPassesThroughUnchanged proves the fix was not
+// over-applied: Options.Timeout has no default (0 deliberately means "no
+// blanket timeout", spec 3.3), so unlike every other numeric field it must
+// NOT be routed through orDuration. A negative value here must reach
+// http.Client.Timeout untouched.
+func TestNegativeTimeoutPassesThroughUnchanged(t *testing.T) {
+	t.Parallel()
+	c := httpclient.New(httpclient.Options{Timeout: -8 * time.Second})
+	if got, want := c.Timeout, -8*time.Second; got != want {
+		t.Errorf("Client.Timeout = %v, want %v (Timeout must pass through unclamped)", got, want)
+	}
+}
+
 // Every field gets a DISTINCT value. Identical values would pass even if two
 // fields were wired to each other's destinations, and go-mutesting does not
 // mutate struct-literal field assignments -- so this table is the only thing

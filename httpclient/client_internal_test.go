@@ -37,6 +37,15 @@ func TestDialerCarriesTheDialTimeoutAndKeepAlive(t *testing.T) {
 			wantTimeout:   5 * time.Second,
 			wantKeepAlive: 30 * time.Second,
 		},
+		{
+			// A negative Timeout means "no deadline at all" to net.Dialer --
+			// the exact opposite of Deviation 1's fail-fast intent -- so it
+			// must take the default exactly as zero does.
+			name:          "negative DialTimeout takes Deviation 1's default",
+			opts:          Options{DialTimeout: -1 * time.Second},
+			wantTimeout:   5 * time.Second,
+			wantKeepAlive: 30 * time.Second,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

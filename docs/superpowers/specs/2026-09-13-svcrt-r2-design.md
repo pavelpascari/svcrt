@@ -86,17 +86,24 @@ of interop friction paid at every call site forever.
 
 ```go
 type Options struct {
-	DialTimeout           time.Duration // 0 -> 5s  (stdlib default is 30s)
-	TLSHandshakeTimeout   time.Duration // 0 -> 10s, matching http.DefaultTransport
-	ResponseHeaderTimeout time.Duration // 0 -> 10s  (stdlib leaves this unbounded)
-	IdleConnTimeout       time.Duration // 0 -> 90s, matching http.DefaultTransport
-	ExpectContinueTimeout time.Duration // 0 -> 1s,  matching http.DefaultTransport
-	MaxIdleConns          int           // 0 -> 100, matching http.DefaultTransport
-	MaxIdleConnsPerHost   int           // 0 -> 100  (stdlib effective default is 2)
-	Timeout               time.Duration // 0 -> none; see 3.3
+	DialTimeout           time.Duration // <=0 -> 5s  (stdlib default is 30s)
+	TLSHandshakeTimeout   time.Duration // <=0 -> 10s, matching http.DefaultTransport
+	ResponseHeaderTimeout time.Duration // <=0 -> 10s  (stdlib leaves this unbounded)
+	IdleConnTimeout       time.Duration // <=0 -> 90s, matching http.DefaultTransport
+	ExpectContinueTimeout time.Duration // <=0 -> 1s,  matching http.DefaultTransport
+	MaxIdleConns          int           // <=0 -> 100, matching http.DefaultTransport
+	MaxIdleConnsPerHost   int           // <=0 -> 100  (stdlib effective default is 2)
+	Timeout               time.Duration // 0 -> none; negative passes through unchanged; see 3.3
 	Middleware            Middleware
 }
 ```
+
+Every field above takes its default for a non-positive value, not only zero: a
+negative duration reaching `http.Transport` or `net.Dialer` unclamped means NO
+deadline at all to those types -- the opposite of what a caller setting a
+negative value could have intended. `Timeout` is the one exception, per §3.3:
+it has no default, so a negative value is passed through to
+`http.Client.Timeout` unchanged rather than clamped.
 
 Values were read off `http.DefaultTransport` at go1.25 rather than chosen, so
 that the only deviations are the three that are deliberate. Verified empirically,
