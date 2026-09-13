@@ -186,17 +186,32 @@ data race behind 100% coverage and a 0.97 mutation score in one such module —
 every existing test gave the racing call a 20ms head start, so the race never
 fired under either gate. `-count=10` (with `-race`) is the check that would
 have caught it; a single green run says almost nothing about a module whose
-bugs are "hangs one run in fifty," not "returns the wrong value." `lifecycle`
-and `httpserver` run this way; the other library modules stay at `-count=1`.
+bugs are "hangs one run in fifty," not "returns the wrong value." `lifecycle`,
+`httpserver` and `resilience` run this way; the other library modules stay at
+`-count=1`.
 
 The list lives in `scripts/lib.sh` (`COUNT_MODULES`) and is **asserted against
-the modules on disk**. It has to be hand-kept -- it is a judgement about which
-modules are concurrent, not an inventory -- and a hand-kept list of module
-names is exactly the failure mode the derived `MODULES` list exists to avoid:
-a rename or a typo leaves the entry matching nothing, the module silently
-drops to `-count=1`, and CI still prints OK while this section still claims
-the gate applies. A gate that can quietly stop applying is worse than no gate,
-because the documentation keeps vouching for it.
+the modules on disk, in both directions**. It has to be hand-kept -- it is a
+judgement about which modules are concurrent, not an inventory -- and a
+hand-kept list of module names is exactly the failure mode the derived
+`MODULES` list exists to avoid: a rename or a typo leaves the entry matching
+nothing, the module silently drops to `-count=1`, and CI still prints OK while
+this section still claims the gate applies. A gate that can quietly stop
+applying is worse than no gate, because the documentation keeps vouching for
+it.
+
+That argument was made here at R2 and a guard was written for it -- and then
+R3 shipped the other half of the same failure anyway. `resilience` has a
+timer and a retry loop on the request path, the spec named it in bold as
+needing this gate, and it ran a whole milestone at `-count=1` because nobody
+added it to the list. The forward guard could not see it: a name matching
+**nothing** is caught, a module missing from the list is not. So `lib.sh` now
+also asserts the **inverse** -- every module NOT in `COUNT_MODULES` is grepped
+for the constructs the gate exists for (`time.NewTimer`, `time.After`, a
+goroutine launch, `sync.`, `atomic.`) and must either join the list or carry a
+`COUNT_EXEMPT` entry saying, in a sentence, why it needs no repeat runs. It is
+a heuristic, and it errs toward asking: a false alarm costs one line of
+justification, and the miss it replaces cost a milestone.
 
 `scripts/release.sh` applies the same policy, not a weaker one. Tagging is the
 point after which a version is permanent, so it is the last place the policy

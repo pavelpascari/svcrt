@@ -16,6 +16,25 @@ import (
 
 	"github.com/pavelpascari/svcrt/config"
 	"github.com/pavelpascari/svcrt/contract"
+	"github.com/pavelpascari/svcrt/httpclient"
+	"github.com/pavelpascari/svcrt/resilience"
+)
+
+// Spec §7 criterion 2, stated rather than implied: resilience's constructors
+// return the bare func(http.RoundTripper) http.RoundTripper, so their results
+// are assignable to httpclient.Middleware with neither module importing the
+// other. Two different NAMED types with identical underlying types are not
+// assignable in Go; one side must be unnamed, and resilience is that side
+// (conventions.md §2).
+//
+// buildStack already demonstrates this by passing resilience.Retry(...) into
+// httpclient.Chain(...), so the property was met in substance -- but as a
+// side effect of one call site, which disappears the day someone rewires the
+// pricing client. The exemplar is the only place that may import both, so
+// the check belongs here, in a line whose entire job is to fail to compile.
+var (
+	_ httpclient.Middleware = resilience.Retry(resilience.Policy{})
+	_ httpclient.Middleware = resilience.Timeout(time.Second)
 )
 
 func mapSource(m map[string]string) config.Source {
@@ -496,5 +515,62 @@ func TestAcceptanceThePricingCallActuallyWaitsBetweenRetries(t *testing.T) {
 
 	if elapsed < 15*time.Millisecond {
 		t.Errorf("elapsed = %v, want >= 15ms; two 10ms backoffs must actually happen between retries", elapsed)
+	}
+}
+
+// TestAcceptanceRetriesReuseOneConnection is spec §7 criterion 6: count
+// StateNew on the upstream and require ONE connection across a multi-attempt
+// retry, not one per attempt.
+//
+// This is the effect draining exists for, and nothing else in the repo
+// asserts it end to end. resilience's own TestADiscardedResponseIsDrainedAndClosed
+// puts a fake body behind a fake RoundTripper and checks read-to-EOF plus
+// Close -- a good, fast unit gate, but there is no socket in it. Delete the
+// io.Copy from resilience's drain and all three retry acceptance tests above
+// stay green while the upstream sees three connections for three attempts:
+// every retry burning a fresh TCP handshake, in the exemplar whose whole job
+// is to show the stack working.
+func TestAcceptanceRetriesReuseOneConnection(t *testing.T) {
+	var attempts, conns atomic.Int64
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			// A body worth draining: a discarded response with nothing in it
+			// would be reusable whether or not drain read it.
+			fmt.Fprint(w, strings.Repeat("upstream is warming up. ", 100))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"amount_minor":1250}`)
+	}))
+	// Set before Start, like the shutdown test above: the server reads
+	// ConnState from its own goroutine once it is serving.
+	upstream.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	upstream.Start()
+	defer upstream.Close()
+
+	s := newStack(t, 0, upstream.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.lc.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	amount, err := s.pricing.Quote(context.Background(), "SKU-1")
+	if err != nil {
+		t.Fatalf("Quote: %v", err)
+	}
+	if amount != 1250 {
+		t.Errorf("amount = %d, want 1250", amount)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("upstream saw %d attempts, want 3 (two failures then a success)", got)
+	}
+	if got := conns.Load(); got != 1 {
+		t.Errorf("upstream accepted %d connections for 3 attempts, want 1: a discarded response is not being drained, so its connection never returns to the pool and every retry pays for a fresh TCP handshake", got)
 	}
 }

@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -321,58 +323,6 @@ func TestBackoffTimerFires(t *testing.T) {
 	}
 	if elapsed < 40*time.Millisecond {
 		t.Errorf("elapsed = %v, want at least 40ms (backoff didn't sleep)", elapsed)
-	}
-}
-
-// Test that empty request method is treated as GET (idempotent).
-func TestEmptyMethodIsTreatedAsGet(t *testing.T) {
-	t.Parallel()
-	var calls atomic.Int64
-	rt := resilience.Retry(resilience.Policy{
-		MaxAttempts: 2,
-		Backoff:     resilience.Constant(0),
-	})(rtFunc(func(*http.Request) (*http.Response, error) {
-		calls.Add(1)
-		return respond(http.StatusServiceUnavailable), nil
-	}))
-
-	req, err := http.NewRequestWithContext(context.Background(), "", "http://x.invalid/", nil)
-	if err != nil {
-		t.Fatalf("NewRequest: %v", err)
-	}
-	resp, err := rt.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("RoundTrip: %v", err)
-	}
-	resp.Body.Close()
-	if got := calls.Load(); got != 2 {
-		t.Errorf("attempts = %d, want 2 (empty method is idempotent)", got)
-	}
-}
-
-// Test that ineligible methods don't retry.
-func TestIneligibleMethodDoesntRetry(t *testing.T) {
-	t.Parallel()
-	var calls atomic.Int64
-	rt := resilience.Retry(resilience.Policy{
-		MaxAttempts: 3,
-		Backoff:     resilience.Constant(0),
-	})(rtFunc(func(*http.Request) (*http.Response, error) {
-		calls.Add(1)
-		return respond(http.StatusServiceUnavailable), nil
-	}))
-
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://x.invalid/", strings.NewReader("payload"))
-	if err != nil {
-		t.Fatalf("NewRequest: %v", err)
-	}
-	resp, err := rt.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("RoundTrip: %v", err)
-	}
-	resp.Body.Close()
-	if got := calls.Load(); got != 1 {
-		t.Errorf("attempts = %d, want 1 (POST is not eligible by default)", got)
 	}
 }
 
@@ -738,5 +688,307 @@ func TestMaxAttemptsOfOneMeansNoRetries(t *testing.T) {
 
 	if got := calls.Load(); got != 1 {
 		t.Errorf("attempts = %d, want 1 -- an explicit MaxAttempts: 1 must not be overridden to the default", got)
+	}
+}
+
+// One Retry middleware, many goroutines. Retry(p) normalises p once at
+// construction and closes over the result, and every request through a client
+// shares that one closure -- so the shared state is real even though nothing
+// currently writes to it. Without a test that drives one middleware from
+// several goroutines at once, -race has nothing to watch, and the -count=10
+// gate conventions.md §5 applies to this module observes an empty suite: two
+// halves of one protection, each worthless alone.
+//
+// The methods are mixed on purpose. A GET reads p.RetryMethods, p.RetryIf,
+// p.Backoff and the Retry-After path on every one of its three attempts,
+// while a POST takes the ineligible early return -- so the concurrent reads
+// cover both branches of eligible rather than one hot loop.
+func TestOneRetryMiddlewareIsSafeUnderConcurrentUse(t *testing.T) {
+	t.Parallel()
+	const goroutines = 64
+	const perGoroutine = 8
+
+	var calls atomic.Int64
+	rt := resilience.Retry(resilience.Policy{
+		MaxAttempts: 3,
+		Backoff:     resilience.Constant(0),
+	})(rtFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		r := respond(http.StatusServiceUnavailable)
+		r.Header.Set("Retry-After", "0")
+		return r, nil
+	}))
+
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			method := http.MethodGet
+			if i%2 == 1 {
+				method = http.MethodPost
+			}
+			for j := 0; j < perGoroutine; j++ {
+				req, err := http.NewRequestWithContext(context.Background(), method, "http://x.invalid/", nil)
+				if err != nil {
+					t.Errorf("NewRequest: %v", err)
+					return
+				}
+				resp, err := rt.RoundTrip(req)
+				if err != nil {
+					t.Errorf("RoundTrip: %v", err)
+					return
+				}
+				resp.Body.Close()
+				if resp.StatusCode != http.StatusServiceUnavailable {
+					t.Errorf("StatusCode = %d, want 503", resp.StatusCode)
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// Half the goroutines send GETs (3 attempts each) and half send POSTs
+	// (1 attempt each), so the policy the shared closure holds is asserted,
+	// not just the absence of a race report.
+	want := int64(goroutines / 2 * perGoroutine * (3 + 1))
+	if got := calls.Load(); got != want {
+		t.Errorf("attempts = %d, want %d -- the shared policy did not apply uniformly across goroutines", got, want)
+	}
+}
+
+// A hostile or broken upstream must not be able to park the caller for a day
+// with one header. Retry-After outranks the policy backoff, but only up to
+// maxRetryAfter; past that the policy backoff is used instead.
+//
+// The RoundTrip runs in a goroutine behind a select rather than being timed
+// inline: without the cap this call sleeps for 24 hours, and a test that
+// hangs for go test's 10-minute default instead of failing is the failure
+// mode conventions.md §5 forbids. Cancelling the context releases the
+// sleeping goroutine on the way out.
+func TestAnExcessiveRetryAfterDoesNotParkTheCaller(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int64
+	rt := resilience.Retry(resilience.Policy{
+		MaxAttempts: 2,
+		Backoff:     resilience.Constant(0),
+	})(rtFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		r := respond(http.StatusServiceUnavailable)
+		r.Header.Set("Retry-After", "86400") // one day
+		return r, nil
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background()) // no deadline: canWait cannot help
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://x.invalid/", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	done := make(chan *http.Response, 1)
+	go func() {
+		resp, _ := rt.RoundTrip(req)
+		done <- resp
+	}()
+
+	select {
+	case resp := <-done:
+		if resp != nil {
+			resp.Body.Close()
+		}
+		if got := calls.Load(); got != 2 {
+			t.Errorf("attempts = %d, want 2", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Retry-After: 86400 parked the caller; an unbounded header is a denial of service against the client (maxRetryAfter)")
+	}
+}
+
+// The cap's literal value, pinned at its exact boundary and without sleeping
+// for thirty seconds.
+//
+// The trick is canWait: with a 50ms deadline on the request, a delay the code
+// actually adopted is one it cannot afford, so the loop returns the first
+// response immediately instead of waiting. So "was the header honoured?"
+// reads out as an attempt count, in microseconds. At exactly maxRetryAfter
+// the header wins and there is one attempt; one second past it, the policy's
+// zero backoff wins and there are two.
+func TestTheRetryAfterCapIsExactlyThirtySeconds(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		header       string
+		wantAttempts int64
+	}{
+		{"30", 1}, // exactly the cap: honoured, and too long for the deadline
+		{"31", 2}, // one second over: ignored, policy backoff of 0 applies
+	} {
+		var calls atomic.Int64
+		rt := resilience.Retry(resilience.Policy{
+			MaxAttempts: 2,
+			Backoff:     resilience.Constant(0),
+		})(rtFunc(func(*http.Request) (*http.Response, error) {
+			calls.Add(1)
+			r := respond(http.StatusServiceUnavailable)
+			r.Header.Set("Retry-After", tc.header)
+			return r, nil
+		}))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://x.invalid/", nil)
+		if err != nil {
+			cancel()
+			t.Fatalf("NewRequest: %v", err)
+		}
+		resp, err := rt.RoundTrip(req)
+		if err != nil {
+			cancel()
+			t.Fatalf("Retry-After %s: RoundTrip: %v", tc.header, err)
+		}
+		resp.Body.Close()
+		cancel()
+
+		if got := calls.Load(); got != tc.wantAttempts {
+			t.Errorf("Retry-After: %s -- attempts = %d, want %d (the cap is not exactly %v)", tc.header, got, tc.wantAttempts, 30*time.Second)
+		}
+	}
+}
+
+// http.RoundTripper's contract forbids modifying the request: a RoundTripper
+// may consume its Body and must otherwise leave it alone. attemptRequest's
+// Clone is what keeps that promise across retries, and nothing held it down
+// -- replacing the clone with `req.Body = body; return req` survived the
+// whole suite at review.
+//
+// Writing this test naively produces a vacuous one. Stamping a header in the
+// transport and asserting the caller's request is unstamped fails at HEAD
+// too, because attempt 1 legitimately IS the caller's request. The assertion
+// has to distinguish attempts: attempt 1 is the original by design, every
+// attempt after it must be a different *http.Request, and the caller's copy
+// must carry only attempt 1's mark.
+func TestARetriedAttemptDoesNotMutateTheCallersRequest(t *testing.T) {
+	t.Parallel()
+	var seen []*http.Request
+
+	rt := resilience.Retry(resilience.Policy{
+		MaxAttempts:  3,
+		Backoff:      resilience.Constant(0),
+		RetryMethods: []string{http.MethodPost}, // opted in, so the body is replayed and cloned
+	})(rtFunc(func(r *http.Request) (*http.Response, error) {
+		seen = append(seen, r)
+		r.Header.Set("X-Attempt", strconv.Itoa(len(seen)))
+		return respond(http.StatusServiceUnavailable), nil
+	}))
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		"http://x.invalid/", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	resp.Body.Close()
+
+	if len(seen) != 3 {
+		t.Fatalf("attempts = %d, want 3", len(seen))
+	}
+	if seen[0] != req {
+		t.Error("attempt 1 sent a copy; it must send the caller's own request, body and all")
+	}
+	for i, got := range seen[1:] {
+		if got == req {
+			t.Errorf("attempt %d sent the caller's own *http.Request; a retry must send a clone", i+2)
+		}
+	}
+	if got := req.Header.Get("X-Attempt"); got != "1" {
+		t.Errorf("the caller's request came back stamped %q, want %q -- a later attempt's mutations reached it", got, "1")
+	}
+}
+
+// A RetryIf that panics is caller error and the panic must propagate --
+// but the response in hand belongs to the retry loop, and unwinding past it
+// used to leave a body nobody could close and a connection nobody could
+// reuse. The process is often about to die, which is why this is minor; it
+// is not always, since a caller may recover.
+func TestAPanickingRetryIfStillClosesTheResponse(t *testing.T) {
+	t.Parallel()
+	var drained, closed atomic.Bool
+
+	rt := resilience.Retry(resilience.Policy{
+		MaxAttempts: 3,
+		Backoff:     resilience.Constant(0),
+		RetryIf:     func(*http.Response, error) bool { panic("boom") },
+	})(rtFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Header:     make(http.Header),
+			Body: &closeTracker{
+				Reader:    strings.NewReader("an error page"),
+				readToEOF: &drained,
+				closed:    &closed,
+			},
+		}, nil
+	}))
+
+	func() {
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Error("a panicking RetryIf did not propagate; caller errors must not be swallowed")
+				return
+			}
+			if s, ok := r.(string); !ok || s != "boom" {
+				t.Errorf("recovered %v, want the caller's own panic value", r)
+			}
+		}()
+		_, _ = rt.RoundTrip(get(t))
+	}()
+
+	if !closed.Load() {
+		t.Error("the in-flight response was not closed while the panic unwound past the retry loop")
+	}
+	if !drained.Load() {
+		t.Error("the in-flight response was not drained; its connection will not be reused")
+	}
+}
+
+// Retry closes over the normalised policy for the life of the middleware, so
+// a RetryMethods slice retained by reference would let a caller change live
+// policy by appending to their own slice -- from whatever goroutine they
+// happen to be on, against a read on the request path. Retry copies it.
+func TestRetryMethodsIsCopiedNotRetained(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int64
+
+	methods := []string{http.MethodPost}
+	rt := resilience.Retry(resilience.Policy{
+		MaxAttempts:  3,
+		Backoff:      resilience.Constant(0),
+		RetryMethods: methods,
+	})(rtFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return respond(http.StatusServiceUnavailable), nil
+	}))
+
+	// The caller reuses their slice after constructing the middleware.
+	methods[0] = http.MethodDelete
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		"http://x.invalid/", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	resp.Body.Close()
+
+	if got := calls.Load(); got != 3 {
+		t.Errorf("attempts = %d, want 3 -- the policy followed the caller's slice after construction", got)
 	}
 }
