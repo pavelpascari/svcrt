@@ -908,3 +908,50 @@ func TestARetriedAttemptDoesNotMutateTheCallersRequest(t *testing.T) {
 		t.Errorf("the caller's request came back stamped %q, want %q -- a later attempt's mutations reached it", got, "1")
 	}
 }
+
+// A RetryIf that panics is caller error and the panic must propagate --
+// but the response in hand belongs to the retry loop, and unwinding past it
+// used to leave a body nobody could close and a connection nobody could
+// reuse. The process is often about to die, which is why this is minor; it
+// is not always, since a caller may recover.
+func TestAPanickingRetryIfStillClosesTheResponse(t *testing.T) {
+	t.Parallel()
+	var drained, closed atomic.Bool
+
+	rt := resilience.Retry(resilience.Policy{
+		MaxAttempts: 3,
+		Backoff:     resilience.Constant(0),
+		RetryIf:     func(*http.Response, error) bool { panic("boom") },
+	})(rtFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Header:     make(http.Header),
+			Body: &closeTracker{
+				Reader:    strings.NewReader("an error page"),
+				readToEOF: &drained,
+				closed:    &closed,
+			},
+		}, nil
+	}))
+
+	func() {
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Error("a panicking RetryIf did not propagate; caller errors must not be swallowed")
+				return
+			}
+			if s, ok := r.(string); !ok || s != "boom" {
+				t.Errorf("recovered %v, want the caller's own panic value", r)
+			}
+		}()
+		_, _ = rt.RoundTrip(get(t))
+	}()
+
+	if !closed.Load() {
+		t.Error("the in-flight response was not closed while the panic unwound past the retry loop")
+	}
+	if !drained.Load() {
+		t.Error("the in-flight response was not drained; its connection will not be reused")
+	}
+}

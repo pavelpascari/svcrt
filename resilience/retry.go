@@ -185,6 +185,26 @@ func drain(resp *http.Response) {
 	_ = resp.Body.Close()
 }
 
+// retryable asks the policy whether this result is worth another attempt.
+//
+// The defer is for the panicking case only. RetryIf is caller-supplied code
+// running on the request path, so a panic in it is caller error and must
+// propagate unchanged -- but the response in hand belongs to this loop, and
+// unwinding past it would leave a body nobody can reach and a connection
+// nobody can reuse. drain is the loop's own verb for discarding a response
+// and tolerates a nil one.
+func (p Policy) retryable(resp *http.Response, err error) bool {
+	decided := false
+	defer func() {
+		if !decided {
+			drain(resp)
+		}
+	}()
+	retry := p.RetryIf(resp, err)
+	decided = true
+	return retry
+}
+
 func (p Policy) do(next http.RoundTripper, req *http.Request) (*http.Response, error) {
 	if !p.eligible(req) {
 		return next.RoundTrip(req)
@@ -197,7 +217,7 @@ func (p Policy) do(next http.RoundTripper, req *http.Request) (*http.Response, e
 		}
 
 		resp, err := next.RoundTrip(attemptReq)
-		if attempt >= p.MaxAttempts || !p.RetryIf(resp, err) {
+		if attempt >= p.MaxAttempts || !p.retryable(resp, err) {
 			return resp, err
 		}
 
