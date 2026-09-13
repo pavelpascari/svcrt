@@ -728,6 +728,199 @@ distinguishes `49ms`, `50ms`, and `51ms`, because no code path branches on
 elapsed ticks or measures the interval. Equivalent by construction: this
 literal has no observer, not merely one the current tests happen to miss.
 
+## `resilience` Module
+
+**Mutation Score: above threshold, with 7 surviving mutants -- all 7 verified
+equivalent, justified below.** As of the Task 4 fix wave (Retry-After and
+Timeout) those are `backoff.go.10`, `backoff.go.11`, `backoff.go.17`,
+`retryafter.go.1`, `retryafter.go.4`, `retryafter.go.10` and
+`retryafter.go.24`. Run `./scripts/mutation.sh resilience` for the current
+score and mutant total.
+
+The module's first mutation run (also Task 4, since no earlier task in this
+milestone ran the gate on `resilience`) came back at 0.63 against a 0.85
+floor with 100% statement coverage -- the widest coverage/mutation gap seen
+in this repo. Two classes of code produced the bulk of the 44 original
+survivors and are recorded here as a caution, not as equivalences, because
+both were fixed rather than justified:
+
+- `Exponential`'s `if attempt < 1 { attempt = 1 }` guard was **dead code**,
+  not merely untested: the loop it feeds, `for i := 1; i < attempt; i++`,
+  already runs zero times for every `attempt <= 1`, so normalising the value
+  to exactly 1 first changes nothing the loop can observe. Five mutants on
+  that guard (shifting the boundary to `<= 1`, `< 0`, `< 2`, reassigning to
+  `0`, or deleting the assignment) all survived because there is no input,
+  including a direct call, that distinguishes any of them from the original.
+  Deleted per this file's own preamble rule (`docs/conventions.md` §3:
+  "delete a clause that is inert through every path including a direct
+  call"), not recorded here.
+- The default `Backoff` literals (`100*time.Millisecond`, `2*time.Second` in
+  `withDefaults`), `MaxAttempts`'s `<= 0` boundary, `maxDrain`'s `64 << 10`,
+  and `wait`/`canWait`'s comparison operators and boundaries were all
+  genuinely under-tested, not equivalent -- each now has a direct test
+  (`retry_internal_test.go`, `drain_internal_test.go`) rather than an entry
+  here. `canWait` additionally gained a `now time.Time` parameter (mirroring
+  `retryAfter`'s existing seam) specifically because its exact boundary --
+  remaining time equal to the requested delay -- is not constructible from
+  two independent `time.Now()` calls; see its doc comment.
+
+### `backoff.go`: `Exponential`'s saturation check, `d >= max/2` (`>=` -> `>`, and the divisor `2` -> `1`)
+
+```go
+for i := 1; i < attempt; i++ {
+	if d >= max/2 {
+		return max
+	}
+	d *= 2
+}
+if d > max {
+	return max
+}
+return d
+```
+
+Mutants: `backoff.go.10` changes `>=` to `>`; `backoff.go.17` changes the
+divisor from `2` to `1` (i.e. the threshold becomes `max` instead of
+`max/2`).
+
+Both survive for the same reason: doubling never *decreases* a value, so any
+`d` that satisfies "the loop should stop and saturate" under the original
+threshold also satisfies it, at the latest, one doubling later -- and the
+function's own final clamp (`if d > max { return max }`) is what absorbs
+that one-iteration delay.
+
+Concretely: whenever `d >= max/2` (the real threshold), doubling once more
+gives `2*d >= max`. If a further loop iteration exists, the mutant's own
+(weaker) check fires on that iteration and returns `max`, matching the
+original. If no further iteration exists -- the loop's `attempt` bound was
+reached on the very iteration the original would have returned early -- the
+loop still executes `d *= 2` for that iteration before exiting, so `d`
+becomes `2*d_before >= max`. The final `if d > max { return max }` then
+returns `max` whenever `2*d_before > max`, and in the one edge case where
+`2*d_before == max` exactly, the function falls into `return d`, which is
+numerically `max` anyway. Every reachable path produces the identical
+`time.Duration` value. Verified by direct calculation across the boundary
+attempt for representative `base`/`max` pairs (100ms/900ms, 100ms/1000ms,
+1ns/2^62ns) before accepting this -- in every case the two programs compute
+the same output, not merely the same output on the cases tried.
+
+This is a genuinely different argument from `backoff.go.2` (`max/2` ->
+`max*2`), which is NOT equivalent and is killed directly by
+`TestExponentialGuardDoesNotOverflowForAMaxNearInt64Max`: for a `max` near
+`1<<63`, computing `max*2` overflows and wraps negative, making the
+mutant's check spuriously true on the very first attempt -- a real,
+observable bug that the "doubling only grows `d`" argument above does not
+cover, because the argument assumes `max*2` doesn't overflow. The
+in-between mutant `backoff.go.25` (`max/2` -> `max/3`, a *smaller* threshold
+that fires *before* the guarantee "one more doubling reaches max" holds) is
+likewise not equivalent, and is killed by
+`TestExponentialSaturationBoundaryIsHalfMaxNotAnyOtherFraction`.
+
+### `backoff.go`: `Exponential`'s final clamp, `d > max` (`>` -> `>=`)
+
+```go
+if d > max {
+	return max
+}
+return d
+```
+
+Mutant `backoff.go.11` changes `>` to `>=`.
+
+The two branches return different *expressions* (`max` the parameter vs. `d`
+the local) but only when `d == max` do they disagree on which branch runs --
+and at that exact point the expressions are equal in value. `d > max` is
+false and `d >= max` is true only when `d == max`, and `return d` at that
+point returns the same `time.Duration` value as `return max`. No input
+distinguishes the two programs' output, only which line produced it.
+
+### `retryafter.go`: nil-response branch, `return 0, false` -> `return -1, false` / `return 1, false`
+
+Mutants `retryafter.go.11` and `retryafter.go.19` (recorded here as history,
+not as survivors -- see below).
+
+These were real, not equivalent: the original test
+(`TestRetryAfterOfANilResponse`) discarded the duration with `_, ok :=
+retryAfter(nil, ...)`, so a changed literal was invisible. Fixed by checking
+the duration is exactly `0`, not just that `ok` is `false`. Listed here only
+because the corollary in this file's preamble applies in reverse: a
+survivor that turns out to be a test gap, not an equivalence, belongs in the
+test suite, not in this list, once fixed -- recorded briefly so a future
+mutation run's mutant numbering doesn't cause confusion about where these
+two went.
+
+### `retryafter.go`: the empty-header guard, `if v == "" { return 0, false }`
+
+```go
+v := resp.Header.Get("Retry-After")
+if v == "" {
+	return 0, false
+}
+
+if secs, err := strconv.Atoi(v); err == nil {
+	...
+}
+
+if t, err := http.ParseTime(v); err == nil {
+	...
+}
+
+return 0, false
+```
+
+Mutant `retryafter.go.4` deletes the guard's body, leaving the `if v == ""`
+condition intact but empty.
+
+`strconv.Atoi("")` and `http.ParseTime("")` both return a non-nil error --
+neither is a valid integer or a valid HTTP-date -- so with the guard's body
+removed, execution for `v == ""` falls straight through both `if`
+statements to the function's own final line, `return 0, false`. That is
+character-for-character the same statement the guard's body contained. Every
+path through the mutated function for `v == ""` produces `(0, false)`,
+identical to the original.
+
+### `retryafter.go`: a byte-identical mutant
+
+Mutant `retryafter.go.1` is a go-mutesting tooling artifact, not a
+semantic change: its saved mutant file is byte-for-byte identical to
+`retryafter.go.original` (same MD5 checksum), confirmed by inspecting both
+files directly with `--do-not-remove-tmp-folder --no-exec`. No test can
+distinguish two identical programs. This is the same class of survivor
+`config`'s preamble already names (a tooling artifact, not a code
+equivalence) rather than a new kind of exception.
+
+### `retryafter.go`: the HTTP-date clamp, `if d < 0 { d = 0 }` (`<` -> `<=`, and `0` -> `1`)
+
+```go
+d := t.Sub(now)
+if d < 0 {
+	d = 0
+}
+return d, true
+```
+
+Mutants: `retryafter.go.10` changes `<` to `<=`; `retryafter.go.24` changes
+the threshold from `0` to `1` (nanosecond).
+
+Both clamp a *superset* of what the original clamps, but only at values
+where clamping is a no-op. `d <= 0` clamps everywhere `d < 0` does, plus at
+`d == 0`, where the assignment `d = 0` does not change `d`. `d < 1` (the
+threshold shifted to `1`) clamps everywhere `d < 0` does, plus at `d == 0`
+(same no-op as above) -- and `time.Duration` is an integer type, so there is
+no value strictly between `0` and `1` for the shifted threshold to newly
+catch. Every input produces the same clamped `d`.
+
+This is a genuinely different argument from `retryafter.go.16` (`0` -> `-1`,
+a *smaller* threshold that stops clamping one nanosecond too early), which
+is NOT equivalent and is killed directly by
+`TestRetryAfterHTTPDateClampsAOneNanosecondPastDateToZero`: with `now` one
+nanosecond past the parsed header time, `d == -1ns`, which the original
+clamps to `0` and this mutant does not (`-1ns < -1ns` is false), returning
+`-1ns` instead. Constructing that exact one-nanosecond boundary needed `now`
+to carry sub-second precision the header's whole-second HTTP-date format
+does not -- an ordinary "now vs. a parsed header" pair can only differ by a
+whole number of seconds and would never exercise this boundary at all.
+
 ## `httpclient` Module
 
 **Mutation Score: 1.000, no survivors** -- an entry under the preamble's

@@ -48,6 +48,25 @@ func TestDrainIsBoundedAndStillCloses(t *testing.T) {
 	}
 }
 
+// TestDrainCapIsExactly64KiB pins maxDrain's literal value, in bytes,
+// against a hardcoded constant rather than the maxDrain symbol itself.
+// TestDrainIsBoundedAndStillCloses above checks "at most maxDrain", using
+// the same symbol on both sides of the comparison -- so it cannot detect the
+// literal changing (63<<10, 64<<9, 65<<10, 64<<11 all still satisfy "at most
+// maxDrain" trivially). An endless body makes the byte count read by drain
+// deterministic: io.LimitReader always yields exactly its limit before EOF
+// when the underlying reader never itself returns EOF or a short read.
+func TestDrainCapIsExactly64KiB(t *testing.T) {
+	t.Parallel()
+	body := &endlessBody{}
+	drain(&http.Response{StatusCode: http.StatusServiceUnavailable, Body: body})
+
+	const want = 64 << 10
+	if got := body.read.Load(); got != want {
+		t.Errorf("drain read %d bytes from an endless body, want exactly %d (64KiB)", got, int64(want))
+	}
+}
+
 // A body under the cap must be drained to EOF and closed, so its connection
 // is reused -- the ordinary case.
 func TestDrainReadsAShortBodyToEOFAndCloses(t *testing.T) {

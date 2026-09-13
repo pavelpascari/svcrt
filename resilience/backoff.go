@@ -29,11 +29,13 @@ func Constant(d time.Duration) Backoff {
 // time.Duration enough times overflows int64 and wraps negative, which would
 // turn a long backoff into no backoff at all.
 // If base is already greater than max, Exponential returns max for any attempt.
+//
+// An attempt below 1 needs no explicit normalisation: the loop below is
+// "for i := 1; i < attempt; i++", which already runs zero times for any
+// attempt <= 1, so the result is base regardless of whether attempt is 1, 0,
+// or negative.
 func Exponential(base, max time.Duration) Backoff {
 	return func(attempt int) time.Duration {
-		if attempt < 1 {
-			attempt = 1
-		}
 		d := base
 		for i := 1; i < attempt; i++ {
 			if d >= max/2 {

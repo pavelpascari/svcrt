@@ -178,7 +178,7 @@ func (p Policy) do(next http.RoundTripper, req *http.Request) (*http.Response, e
 		// Check the deadline BEFORE discarding the response. If there is not
 		// enough time left, the last result is still the caller's best answer
 		// and its body is still readable.
-		if !canWait(req.Context(), delay) {
+		if !canWait(req.Context(), delay, time.Now()) {
 			return resp, err
 		}
 
@@ -192,12 +192,19 @@ func (p Policy) do(next http.RoundTripper, req *http.Request) (*http.Response, e
 
 // canWait reports whether ctx has enough time left to sleep for d and still
 // attempt something afterwards.
-func canWait(ctx context.Context, d time.Duration) bool {
+//
+// now is a parameter rather than a time.Now() call, like retryAfter's,
+// because the exact boundary -- remaining time equal to d, which must NOT be
+// enough -- can only be hit reliably by controlling both sides of the
+// subtraction. Two independent time.Now() calls (one to build a deadline in
+// a test, one inside this function) never land on the same nanosecond, so
+// that boundary is untestable without this seam.
+func canWait(ctx context.Context, d time.Duration, now time.Time) bool {
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		return true
 	}
-	return time.Until(deadline) > d
+	return deadline.Sub(now) > d
 }
 
 // wait sleeps for d, or returns ctx's error if it is cancelled first.

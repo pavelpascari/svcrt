@@ -24,6 +24,7 @@ func TestRetryAfterParsing(t *testing.T) {
 		{"absent header", http.StatusServiceUnavailable, "", 0, false},
 		{"malformed header falls back", http.StatusServiceUnavailable, "soon please", 0, false},
 		{"negative delta is ignored", http.StatusServiceUnavailable, "-5", 0, false},
+		{"delta of exactly -1 is still ignored", http.StatusServiceUnavailable, "-1", 0, false},
 		{"ignored on 502", http.StatusBadGateway, "120", 0, false},
 		{"ignored on 500", http.StatusInternalServerError, "120", 0, false},
 	} {
@@ -40,7 +41,34 @@ func TestRetryAfterParsing(t *testing.T) {
 
 func TestRetryAfterOfANilResponse(t *testing.T) {
 	t.Parallel()
-	if _, ok := retryAfter(nil, time.Now()); ok {
+	d, ok := retryAfter(nil, time.Now())
+	if ok {
 		t.Error("retryAfter(nil) reported a delay")
+	}
+	if d != 0 {
+		t.Errorf("retryAfter(nil) duration = %v, want 0", d)
+	}
+}
+
+// The HTTP-date branch clamps a past date to zero, not to any negative
+// value. http.ParseTime has one-second resolution, so an ordinary "now" and
+// header pair can only ever differ by a whole number of seconds -- landing
+// exactly on the boundary (a negative delta of exactly one nanosecond, the
+// smallest possible negative Duration) needs now to carry sub-second
+// precision that the header's whole-second timestamp does not.
+func TestRetryAfterHTTPDateClampsAOneNanosecondPastDateToZero(t *testing.T) {
+	t.Parallel()
+	// A header parsed to exactly the second boundary; now is one nanosecond
+	// past it, so the parsed time is one nanosecond in the past.
+	now := time.Date(2026, 9, 13, 12, 0, 0, 1, time.UTC)
+	resp := &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header)}
+	resp.Header.Set("Retry-After", "Sun, 13 Sep 2026 12:00:00 GMT")
+
+	got, ok := retryAfter(resp, now)
+	if !ok {
+		t.Fatal("retryAfter did not report a delay")
+	}
+	if got != 0 {
+		t.Errorf("retryAfter one nanosecond in the past = %v, want 0 (clamped)", got)
 	}
 }

@@ -717,3 +717,26 @@ func TestRetryAfterOverridesTheBackoffPolicy(t *testing.T) {
 		t.Errorf("took %v; Retry-After: 0 did not override the 5s backoff", elapsed)
 	}
 }
+
+// An explicit MaxAttempts of 1 means "no retries" and must be respected
+// exactly, not treated as unset the way 0 (and below) is.
+func TestMaxAttemptsOfOneMeansNoRetries(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int64
+	rt := resilience.Retry(resilience.Policy{
+		MaxAttempts: 1,
+	})(rtFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return respond(http.StatusServiceUnavailable), nil
+	}))
+
+	resp, err := rt.RoundTrip(get(t))
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	resp.Body.Close()
+
+	if got := calls.Load(); got != 1 {
+		t.Errorf("attempts = %d, want 1 -- an explicit MaxAttempts: 1 must not be overridden to the default", got)
+	}
+}
