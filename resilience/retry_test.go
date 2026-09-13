@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -404,5 +405,237 @@ func TestAnEmptyMethodIsTreatedAsGET(t *testing.T) {
 
 	if got := calls.Load(); got != 3 {
 		t.Errorf("attempts = %d, want 3 (an empty method is a GET and GET is retried)", got)
+	}
+}
+
+// nonReplayable is a body http.NewRequest cannot build a GetBody for.
+type nonReplayable struct{ r io.Reader }
+
+func (o *nonReplayable) Read(p []byte) (int, error) { return o.r.Read(p) }
+
+// Spec 3.1. A request whose body cannot be rebuilt must be sent ONCE. Retrying
+// it would transmit an empty body on every attempt after the first -- a
+// well-formed request carrying nothing, with no error anywhere.
+func TestARequestWithANonReplayableBodyIsNotRetried(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int64
+	var bodies []string
+
+	rt := resilience.Retry(resilience.Policy{
+		MaxAttempts:  3,
+		Backoff:      resilience.Constant(0),
+		RetryMethods: []string{http.MethodPost}, // opted in, so only replayability can stop it
+	})(rtFunc(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		return respond(http.StatusServiceUnavailable), nil
+	}))
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		"http://x.invalid/", &nonReplayable{strings.NewReader("payload")})
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if req.GetBody != nil {
+		t.Fatal("precondition failed: GetBody should be nil for an opaque reader")
+	}
+
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	resp.Body.Close()
+
+	if got := calls.Load(); got != 1 {
+		t.Errorf("attempts = %d, want 1 (body cannot be replayed)", got)
+	}
+	if len(bodies) != 1 || bodies[0] != "payload" {
+		t.Errorf("bodies = %q, want exactly one %q", bodies, "payload")
+	}
+}
+
+// Spec 3.1, the other half: when the body CAN be rebuilt, every attempt must
+// send the same bytes.
+func TestAReplayableBodyIsResentIntact(t *testing.T) {
+	t.Parallel()
+	var bodies []string
+
+	rt := resilience.Retry(resilience.Policy{
+		MaxAttempts:  3,
+		Backoff:      resilience.Constant(0),
+		RetryMethods: []string{http.MethodPost},
+	})(rtFunc(func(r *http.Request) (*http.Response, error) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		return respond(http.StatusServiceUnavailable), nil
+	}))
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		"http://x.invalid/", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	resp.Body.Close()
+
+	want := []string{"payload", "payload", "payload"}
+	if !slices.Equal(bodies, want) {
+		t.Errorf("bodies = %q, want %q -- a retried attempt sent the wrong bytes", bodies, want)
+	}
+}
+
+// closeTracker records whether a discarded response was drained before close.
+type closeTracker struct {
+	io.Reader
+	readToEOF *atomic.Bool
+	closed    *atomic.Bool
+}
+
+func (c *closeTracker) Read(p []byte) (int, error) {
+	n, err := c.Reader.Read(p)
+	if err == io.EOF {
+		c.readToEOF.Store(true)
+	}
+	return n, err
+}
+
+func (c *closeTracker) Close() error {
+	c.closed.Store(true)
+	return nil
+}
+
+// Spec 3.3. A response the retry loop throws away must be drained to EOF, or
+// its connection is not returned to the pool and every attempt costs a fresh
+// TCP handshake -- defeating httpclient's MaxIdleConnsPerHost default.
+func TestADiscardedResponseIsDrainedAndClosed(t *testing.T) {
+	t.Parallel()
+	var drained, closed atomic.Bool
+
+	first := true
+	rt := resilience.Retry(resilience.Policy{
+		MaxAttempts: 2,
+		Backoff:     resilience.Constant(0),
+	})(rtFunc(func(*http.Request) (*http.Response, error) {
+		if first {
+			first = false
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Header:     make(http.Header),
+				Body: &closeTracker{
+					Reader:    strings.NewReader("an error page"),
+					readToEOF: &drained,
+					closed:    &closed,
+				},
+			}, nil
+		}
+		return respond(http.StatusOK), nil
+	}))
+
+	resp, err := rt.RoundTrip(get(t))
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if !drained.Load() {
+		t.Error("the discarded response was not drained to EOF; its connection will not be reused")
+	}
+	if !closed.Load() {
+		t.Error("the discarded response was not closed")
+	}
+}
+
+// The returned response must NOT be drained -- the caller still needs it.
+func TestTheReturnedResponseIsNotDrained(t *testing.T) {
+	t.Parallel()
+	rt := resilience.Retry(resilience.Policy{
+		MaxAttempts: 2,
+		Backoff:     resilience.Constant(0),
+	})(rtFunc(func(*http.Request) (*http.Response, error) {
+		return respond(http.StatusOK), nil
+	}))
+
+	resp, err := rt.RoundTrip(get(t))
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	defer resp.Body.Close()
+
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading the returned body: %v", err)
+	}
+	if string(b) != "body" {
+		t.Errorf("returned body = %q, want %q -- the retry loop consumed it", b, "body")
+	}
+}
+
+// Spec 3.1, the failure half: if GetBody itself fails on a later attempt (the
+// body source became unreadable between attempts -- a temp file removed, a
+// stream that errors on re-open), the retry loop must surface that error
+// rather than sending a broken request or panicking.
+func TestARequestWhoseBodyCannotBeRebuiltReturnsTheRebuildError(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int64
+	boom := errors.New("body source gone")
+
+	rt := resilience.Retry(resilience.Policy{
+		MaxAttempts:  3,
+		Backoff:      resilience.Constant(0),
+		RetryMethods: []string{http.MethodPost},
+	})(rtFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return respond(http.StatusServiceUnavailable), nil
+	}))
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		"http://x.invalid/", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.GetBody = func() (io.ReadCloser, error) { return nil, boom }
+
+	_, err = rt.RoundTrip(req)
+	if !errors.Is(err, boom) {
+		t.Errorf("err = %v, want %v", err, boom)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("attempts = %d, want 1 (first attempt uses the original body, not GetBody)", got)
+	}
+}
+
+// Carried finding from Task 2's review: the attempt cap and RetryIf must be
+// checked BEFORE the backoff is computed. A Backoff that records the attempts
+// it is asked about pins this -- it must never be asked about the final
+// attempt, since there is no wait after it.
+func TestBackoffIsNotComputedAfterTheFinalAttempt(t *testing.T) {
+	t.Parallel()
+	var asked []int
+	recordingBackoff := func(attempt int) time.Duration {
+		asked = append(asked, attempt)
+		return 0
+	}
+
+	rt := resilience.Retry(resilience.Policy{
+		MaxAttempts: 3,
+		Backoff:     recordingBackoff,
+	})(rtFunc(func(*http.Request) (*http.Response, error) {
+		return respond(http.StatusServiceUnavailable), nil
+	}))
+
+	resp, err := rt.RoundTrip(get(t))
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	resp.Body.Close()
+
+	want := []int{1, 2}
+	if !slices.Equal(asked, want) {
+		t.Errorf("Backoff asked about attempts %v, want %v -- it must not be consulted after the final attempt", asked, want)
 	}
 }

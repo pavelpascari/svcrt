@@ -2,10 +2,21 @@ package resilience
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"slices"
 	"time"
 )
+
+// maxDrain caps how much of a discarded response body is read before giving up
+// on reusing its connection.
+//
+// Draining to EOF is what returns the connection to the pool. Draining without
+// a cap means a hostile or broken upstream can hold the client reading an
+// unbounded error page on every retry, which is a denial of service against
+// the caller. 64KB covers a real error page; past that, closing early and
+// paying for a new connection is the cheaper failure.
+const maxDrain = 64 << 10
 
 // roundTripperFunc adapts a function to http.RoundTripper. Unexported because
 // this module's exported surface is middleware, not adapters -- a consumer that
@@ -94,14 +105,53 @@ func Retry(p Policy) func(http.RoundTripper) http.RoundTripper {
 	}
 }
 
-// eligible reports whether this request may be retried at all, before any
-// attempt is made. Task 3 adds the body-replay half of this check.
+// eligible reports whether this request may be retried at all.
+//
+// Two gates, both checked before the first attempt:
+//
+// Replayability -- http.Request.Body is consumed by the first send, so a retry
+// needs GetBody to rebuild it. http.NewRequest populates GetBody only for body
+// types it recognises (bytes.Reader, bytes.Buffer, strings.Reader); for an
+// opaque io.Reader it is nil. Retrying such a request would send a well-formed
+// request with an EMPTY body on every attempt after the first, with no error
+// raised anywhere. Refusing to retry is the honest outcome.
+//
+// Idempotency -- a lost response does not mean the request did not happen.
 func (p Policy) eligible(req *http.Request) bool {
+	if req.Body != nil && req.GetBody == nil {
+		return false
+	}
 	method := req.Method
 	if method == "" {
 		method = http.MethodGet // net/http treats an empty method as GET
 	}
 	return slices.Contains(p.RetryMethods, method)
+}
+
+// attemptRequest returns the request to send for this attempt. The first uses
+// the original; later ones rebuild the body from GetBody, because the previous
+// attempt consumed it.
+func attemptRequest(req *http.Request, attempt int) (*http.Request, error) {
+	if attempt == 1 || req.GetBody == nil {
+		return req, nil
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return nil, err
+	}
+	clone := req.Clone(req.Context())
+	clone.Body = body
+	return clone, nil
+}
+
+// drain reads a discarded response far enough to let its connection be reused,
+// then closes it. See maxDrain.
+func drain(resp *http.Response) {
+	if resp == nil || resp.Body == nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrain))
+	_ = resp.Body.Close()
 }
 
 func (p Policy) do(next http.RoundTripper, req *http.Request) (*http.Response, error) {
@@ -110,7 +160,12 @@ func (p Policy) do(next http.RoundTripper, req *http.Request) (*http.Response, e
 	}
 
 	for attempt := 1; ; attempt++ {
-		resp, err := next.RoundTrip(req)
+		attemptReq, buildErr := attemptRequest(req, attempt)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+
+		resp, err := next.RoundTrip(attemptReq)
 		if attempt >= p.MaxAttempts || !p.RetryIf(resp, err) {
 			return resp, err
 		}
@@ -123,6 +178,8 @@ func (p Policy) do(next http.RoundTripper, req *http.Request) (*http.Response, e
 		if !canWait(req.Context(), delay) {
 			return resp, err
 		}
+
+		drain(resp)
 
 		if err := wait(req.Context(), delay); err != nil {
 			return nil, err
