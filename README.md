@@ -13,9 +13,9 @@ never owns your process — you write `main()`.
 |---|---|
 | `contract` | The type vocabulary generated code targets: error interfaces and a typed middleware seam. Imports only `context`. |
 | `config` | Decodes environment variables into a struct once, at construction, reporting every violation at once. |
-| `logging` | A `slog.Handler` that enriches records from their context, plus shared attribute-key conventions. |
+| `logging` | A `slog.Handler` that enriches records from their context. Defines no attribute keys of its own — each key belongs to whichever module emits it. |
 | `lifecycle` | Starts components in dependency order, stops them in reverse, and drains before it stops. Owns no signals — you pass it a context. |
-| `httpserver` | An `http.Server` with timeout defaults that are hard to get wrong, the three Kubernetes health gates, and an admin mux. |
+| `httpserver` | An `http.Server` with timeout defaults that are hard to get wrong, the three Kubernetes health gates, an admin mux, and an `AccessLog` middleware that logs one line per request. |
 | `httpclient` | An `http.Client` with connection-pool and timeout defaults that are hard to get wrong, and a `RoundTripper` middleware seam mirroring `httpserver`'s. |
 | `resilience` | Retry with backoff and per-attempt timeouts, as `RoundTripper` middleware. Refuses to retry what it cannot safely replay. |
 

@@ -41,27 +41,36 @@ when an option must carry behaviour, when options are expected to be added by
 modules that do not exist yet, or when the zero value of some field would be a
 dangerous default that a struct literal lets a caller omit by accident.
 
-## 2. `Middleware` means four things, on purpose — never a fifth
+## 2. `Middleware` means three things, on purpose — never a fourth
 
-R0 declared two spellings of `Middleware` and warned a third would be one too
-many. R1 added the third anyway, deliberately, once `httpserver` needed a
-name for the shape the other two were already describing in prose. R2 added a
-fourth, the client-side mirror of that third, once `httpclient` needed the
-same shape on `http.RoundTripper` instead of `http.Handler`. R3 needed that
-exact shape again, for `resilience`'s retry and timeout middleware, and did
-not add a fifth — see below for why declaring one would have been a mistake,
-not just a style preference. All four stand:
+R0 declared two spellings of `Middleware` — `contract.Middleware[Req, Res]`
+and a constructor, `logging.Middleware`, for the transport-level shape it was
+still only describing in prose — and warned a third *type* would be one too
+many. R1 added that third type anyway, deliberately, once `httpserver` needed
+a name, `httpserver.Middleware`, for the shape `logging.Middleware` had been
+building all along. R2 added a fourth, `httpclient.Middleware`, the
+client-side mirror of that third, once `httpclient` needed the same shape on
+`http.RoundTripper` instead of `http.Handler`. R3 needed that exact shape
+again, for `resilience`'s retry and timeout middleware, and did not add a
+fifth — see below for why declaring one would have been a mistake, not just a
+style preference. R4 then removed one of R0's original two: `logging.Middleware`
+had counted as its own entry only because its constructor lived in a
+different package from the type, `httpserver.Middleware`, it returned. Moving
+that constructor into `httpserver` as `AccessLog` closed the gap — a
+same-package constructor returning its own package's named type is just an
+instance of that type, not a spelling of its own, so it needs no separate
+entry here. Three stand:
 
 - `contract.Middleware[Req, Res]` is a **generic type**: the call-level seam,
   `func(Handler[Req, Res]) Handler[Req, Res]`. It exists so hand-written and
   generated code spell the same thing the same way.
-- `logging.Middleware(l *slog.Logger)` is a **constructor function** returning
-  a transport middleware — `func(http.Handler) http.Handler`.
-- `httpserver.Middleware` is the plain **transport-level type** those
-  constructors return: `func(http.Handler) http.Handler`. It has no logic of
-  its own; it names the shape `logging.Middleware` (and every other
-  transport-level constructor) builds, so `Chain` and its callers have
-  something concrete to write down.
+- `httpserver.Middleware` is the plain **transport-level type**:
+  `func(http.Handler) http.Handler`. It has no logic of its own; it names the
+  shape `httpserver.AccessLog` (and every other transport-level constructor)
+  builds, so `Chain` and its callers have something concrete to write down.
+  `AccessLog(l *slog.Logger)` is the constructor that returns it, sitting in
+  the same package as the type it returns — which is exactly why it needs no
+  entry of its own here.
 - `httpclient.Middleware` is the client-side mirror of
   `httpserver.Middleware`: `func(http.RoundTripper) http.RoundTripper`. It
   shares `httpserver.Middleware`'s ordering (in `Chain`, the first argument
@@ -81,8 +90,11 @@ The split is along the transport/call boundary, not along taste:
   uses `httpserver.Middleware`'s shape and does not redeclare the type. Export
   a **constructor** returning `httpserver.Middleware` (equivalently,
   `func(http.Handler) http.Handler`). Name the constructor `Middleware` when
-  the package has exactly one, as `logging` does, and name it for its job
-  (`RecoverMiddleware`, `RequestIDMiddleware`) when it has several.
+  the package has exactly one and lives apart from the `Middleware` type
+  itself; name it for its job (`AccessLog`, `RecoverMiddleware`,
+  `RequestIDMiddleware`) when it has several, or when — as with
+  `httpserver.AccessLog` — the constructor shares a package with the type it
+  returns, where the name `Middleware` is already taken by the type.
 - **Client-side transport middleware** — anything that wraps outgoing
   requests instead of incoming ones — uses `httpclient.Middleware`'s shape,
   `func(http.RoundTripper) http.RoundTripper`, for the same reason
@@ -98,7 +110,7 @@ or client-side `Middleware` type — it names its constructor and returns the
 existing one.
 
 A module that targets someone else's type *without* importing that type's
-package is a different case, not a fifth spelling: it must return the bare,
+package is a different case, not a fourth spelling: it must return the bare,
 unnamed func type instead of a same-shaped type of its own. `resilience` is
 the worked example. `Retry` and `Timeout` wrap `http.RoundTripper` —
 exactly `httpclient.Middleware`'s shape — but `resilience` depends on
@@ -117,6 +129,10 @@ and `Timeout` return the bare `func(http.RoundTripper) http.RoundTripper`,
 never a named type of their own — and that is the general rule for this
 case: a module shipping middleware for a type it does not own returns the
 bare func type, precisely so neither module has to import the other.
+`httpserver.AccessLog` is the contrasting case, not an exception to it:
+it returns `httpserver.Middleware`, a *named* type, and that is fine
+precisely because `AccessLog` lives in `httpserver` itself — the same-package
+case this rule exists to distinguish from `resilience`'s cross-package one.
 
 ## 3. Dead code: when to delete a clause and when to keep and test it
 
