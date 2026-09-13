@@ -16,11 +16,11 @@ import (
 // names are part of the interface rather than free-form text (12-factor XI,
 // amended).
 const (
-	KeyMethod  = "method"
-	KeyRoute   = "route"
-	KeyStatus  = "status"
-	KeyCode    = "code"
-	KeyDurMS   = "duration_ms"
+	KeyMethod = "method"
+	KeyRoute  = "route"
+	KeyStatus = "status"
+	KeyCode   = "code"
+	KeyDurMS  = "duration_ms"
 )
 
 // Options configures the logger returned by New.
