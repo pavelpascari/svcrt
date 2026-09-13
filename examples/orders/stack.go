@@ -9,6 +9,7 @@ import (
 	"github.com/pavelpascari/svcrt/httpclient"
 	"github.com/pavelpascari/svcrt/httpserver"
 	"github.com/pavelpascari/svcrt/lifecycle"
+	"github.com/pavelpascari/svcrt/resilience"
 )
 
 // appStack is the health/lifecycle/api/admin composition. It is built by
@@ -102,7 +103,17 @@ func buildStack(cfg appStackConfig) *appStack {
 		func(ctx context.Context) error { trace("stop:admin"); return admin.Shutdown(ctx) },
 		lifecycle.After(store))
 
-	pricing := NewPricingClient(cfg.PricingURL, httpclient.New(httpclient.Options{}))
+	pricing := NewPricingClient(cfg.PricingURL, httpclient.New(httpclient.Options{
+		Middleware: httpclient.Chain(
+			// resilience returns the bare func(http.RoundTripper) http.RoundTripper,
+			// so it is assignable to httpclient.Middleware with neither module
+			// importing the other. A named type on both sides would not compile.
+			resilience.Retry(resilience.Policy{
+				MaxAttempts: 3,
+				Backoff:     resilience.Constant(10 * time.Millisecond),
+			}),
+		),
+	}))
 	lc.Add("pricing-client",
 		func(context.Context) error { return nil },
 		func(context.Context) error {

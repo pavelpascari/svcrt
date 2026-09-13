@@ -278,16 +278,21 @@ func TestAcceptanceTheStackCallsPricingThroughTheClient(t *testing.T) {
 	// Pin WHICH client the stack built. Replacing httpclient.New(...) with
 	// &http.Client{} satisfies every assertion above -- while using
 	// http.DefaultTransport, the one thing httpclient exists to avoid. That
-	// mutant survived the whole suite at the R2 review. MaxIdleConnsPerHost
-	// is httpclient.New's headline deviation and both http.Transport and
-	// http.DefaultTransport leave it zero, so it identifies the constructor
-	// without the test having to reach for one.
-	tr, ok := s.pricing.http.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("pricing client transport is %T; the stack must build it with httpclient.New, not a bare &http.Client{} on http.DefaultTransport", s.pricing.http.Transport)
-	}
-	if tr.MaxIdleConnsPerHost != 100 {
-		t.Errorf("pricing transport MaxIdleConnsPerHost = %d, want 100; the stack must build the client with httpclient.New", tr.MaxIdleConnsPerHost)
+	// mutant survived the whole suite at the R2 review.
+	//
+	// Since Task 5 wired resilience.Retry through Options.Middleware, the
+	// transport httpclient.New returns is no longer the raw *http.Transport
+	// -- httpclient's own TestMiddlewareWrapsTheTransport documents the same
+	// shape -- so asserting the concrete type IS *http.Transport now catches
+	// the &http.Client{} mutant (http.DefaultTransport is one) as well as a
+	// buildStack that dropped Options.Middleware entirely.
+	switch tr := s.pricing.http.Transport.(type) {
+	case nil:
+		t.Fatal("pricing client transport is nil; the stack must build it with httpclient.New, not a bare &http.Client{}")
+	case *http.Transport:
+		t.Fatal("pricing client transport is the raw *http.Transport; the stack must set httpclient.Options.Middleware so the pricing call retries")
+	default:
+		_ = tr
 	}
 }
 
@@ -382,5 +387,37 @@ func TestAcceptanceShutdownActuallyClosesThePricingConnection(t *testing.T) {
 	defer mu.Unlock()
 	if !closed {
 		t.Error("shutdown did not close the pricing client's pooled connection")
+	}
+}
+
+func TestAcceptanceThePricingCallRetriesATransientFailure(t *testing.T) {
+	var attempts atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, "upstream is warming up")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"amount_minor":1250}`)
+	}))
+	defer upstream.Close()
+
+	s := newStack(t, 0, upstream.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.lc.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	amount, err := s.pricing.Quote(context.Background(), "SKU-1")
+	if err != nil {
+		t.Fatalf("Quote: %v", err)
+	}
+	if amount != 1250 {
+		t.Errorf("amount = %d, want 1250", amount)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Errorf("upstream saw %d attempts, want 3 (two failures then a success)", got)
 	}
 }
