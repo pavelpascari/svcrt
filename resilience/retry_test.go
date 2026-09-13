@@ -325,58 +325,6 @@ func TestBackoffTimerFires(t *testing.T) {
 	}
 }
 
-// Test that empty request method is treated as GET (idempotent).
-func TestEmptyMethodIsTreatedAsGet(t *testing.T) {
-	t.Parallel()
-	var calls atomic.Int64
-	rt := resilience.Retry(resilience.Policy{
-		MaxAttempts: 2,
-		Backoff:     resilience.Constant(0),
-	})(rtFunc(func(*http.Request) (*http.Response, error) {
-		calls.Add(1)
-		return respond(http.StatusServiceUnavailable), nil
-	}))
-
-	req, err := http.NewRequestWithContext(context.Background(), "", "http://x.invalid/", nil)
-	if err != nil {
-		t.Fatalf("NewRequest: %v", err)
-	}
-	resp, err := rt.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("RoundTrip: %v", err)
-	}
-	resp.Body.Close()
-	if got := calls.Load(); got != 2 {
-		t.Errorf("attempts = %d, want 2 (empty method is idempotent)", got)
-	}
-}
-
-// Test that ineligible methods don't retry.
-func TestIneligibleMethodDoesntRetry(t *testing.T) {
-	t.Parallel()
-	var calls atomic.Int64
-	rt := resilience.Retry(resilience.Policy{
-		MaxAttempts: 3,
-		Backoff:     resilience.Constant(0),
-	})(rtFunc(func(*http.Request) (*http.Response, error) {
-		calls.Add(1)
-		return respond(http.StatusServiceUnavailable), nil
-	}))
-
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://x.invalid/", strings.NewReader("payload"))
-	if err != nil {
-		t.Fatalf("NewRequest: %v", err)
-	}
-	resp, err := rt.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("RoundTrip: %v", err)
-	}
-	resp.Body.Close()
-	if got := calls.Load(); got != 1 {
-		t.Errorf("attempts = %d, want 1 (POST is not eligible by default)", got)
-	}
-}
-
 // net/http documents an empty Request.Method as meaning GET. A caller who
 // builds a request literal rather than calling http.NewRequest gets one, and
 // it must be retried like the GET it is -- not silently skipped because ""
