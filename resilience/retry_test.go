@@ -688,3 +688,32 @@ func TestBackoffIsNotComputedAfterTheFinalAttempt(t *testing.T) {
 		t.Errorf("Backoff asked about attempts %v, want %v -- it must not be consulted after the final attempt", asked, want)
 	}
 }
+
+func TestRetryAfterOverridesTheBackoffPolicy(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int64
+	rt := resilience.Retry(resilience.Policy{
+		MaxAttempts: 2,
+		Backoff:     resilience.Constant(5 * time.Second), // would blow the test budget
+	})(rtFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		r := respond(http.StatusServiceUnavailable)
+		r.Header.Set("Retry-After", "0")
+		return r, nil
+	}))
+
+	start := time.Now()
+	resp, err := rt.RoundTrip(get(t))
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	resp.Body.Close()
+
+	if got := calls.Load(); got != 2 {
+		t.Errorf("attempts = %d, want 2", got)
+	}
+	if elapsed > time.Second {
+		t.Errorf("took %v; Retry-After: 0 did not override the 5s backoff", elapsed)
+	}
+}

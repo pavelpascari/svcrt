@@ -171,6 +171,9 @@ func (p Policy) do(next http.RoundTripper, req *http.Request) (*http.Response, e
 		}
 
 		delay := p.Backoff(attempt)
+		if d, ok := retryAfter(resp, time.Now()); ok {
+			delay = d
+		}
 
 		// Check the deadline BEFORE discarding the response. If there is not
 		// enough time left, the last result is still the caller's best answer
