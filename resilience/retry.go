@@ -18,6 +18,37 @@ import (
 // paying for a new connection is the cheaper failure.
 const maxDrain = 64 << 10
 
+// maxRetryAfter caps how long a Retry-After header may park a request.
+//
+// Same reasoning as maxDrain, and the same threat model: a server saying when
+// to come back is better information than a local curve, but an unbounded one
+// is a denial of service against the caller, and it costs the attacker one
+// header. canWait is no defence -- it only engages when the request carries a
+// deadline, and httpclient.New deliberately does not default Options.Timeout,
+// so `Retry-After: 86400` on a background context holds the caller's
+// goroutine, its connection and any lock it owns for a day.
+//
+// 30s is chosen to sit above what real upstreams ask for -- 429 and 503
+// Retry-After values in practice are single-digit to low-tens of seconds, and
+// those are honoured to the second -- and below any plausible
+// request-handling budget, so the cap only ever engages on a value no caller
+// wanted to wait for anyway.
+//
+// A header over the cap falls back to the policy backoff rather than clamping
+// to 30s. A server asking for an hour is saying "do not come back soon", and
+// the jittered exponential (capped at 2s by default, and spread across
+// clients) respects that better than a hard 30s wall of synchronised retries
+// would. Clamping would also quietly convert every hostile header into the
+// longest wait this code permits, which is the attacker's goal minus a
+// constant factor.
+//
+// This is deliberately not a Policy field. Every field is another way to get
+// the default wrong, the honest way to say "this call may take longer" is a
+// context deadline -- which canWait already respects exactly -- and maxDrain
+// sets the precedent: a bound that exists to survive a hostile peer is not a
+// tuning knob.
+const maxRetryAfter = 30 * time.Second
+
 // roundTripperFunc adapts a function to http.RoundTripper. Unexported because
 // this module's exported surface is middleware, not adapters -- a consumer that
 // needs one has httpclient.RoundTripperFunc.
@@ -171,7 +202,7 @@ func (p Policy) do(next http.RoundTripper, req *http.Request) (*http.Response, e
 		}
 
 		delay := p.Backoff(attempt)
-		if d, ok := retryAfter(resp, time.Now()); ok {
+		if d, ok := retryAfter(resp, time.Now()); ok && d <= maxRetryAfter {
 			delay = d
 		}
 

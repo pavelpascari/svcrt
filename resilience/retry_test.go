@@ -808,3 +808,100 @@ func TestOneRetryMiddlewareIsSafeUnderConcurrentUse(t *testing.T) {
 		t.Errorf("attempts = %d, want %d -- the shared policy did not apply uniformly across goroutines", got, want)
 	}
 }
+
+// A hostile or broken upstream must not be able to park the caller for a day
+// with one header. Retry-After outranks the policy backoff, but only up to
+// maxRetryAfter; past that the policy backoff is used instead.
+//
+// The RoundTrip runs in a goroutine behind a select rather than being timed
+// inline: without the cap this call sleeps for 24 hours, and a test that
+// hangs for go test's 10-minute default instead of failing is the failure
+// mode conventions.md §5 forbids. Cancelling the context releases the
+// sleeping goroutine on the way out.
+func TestAnExcessiveRetryAfterDoesNotParkTheCaller(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int64
+	rt := resilience.Retry(resilience.Policy{
+		MaxAttempts: 2,
+		Backoff:     resilience.Constant(0),
+	})(rtFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		r := respond(http.StatusServiceUnavailable)
+		r.Header.Set("Retry-After", "86400") // one day
+		return r, nil
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background()) // no deadline: canWait cannot help
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://x.invalid/", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	done := make(chan *http.Response, 1)
+	go func() {
+		resp, _ := rt.RoundTrip(req)
+		done <- resp
+	}()
+
+	select {
+	case resp := <-done:
+		if resp != nil {
+			resp.Body.Close()
+		}
+		if got := calls.Load(); got != 2 {
+			t.Errorf("attempts = %d, want 2", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Retry-After: 86400 parked the caller; an unbounded header is a denial of service against the client (maxRetryAfter)")
+	}
+}
+
+// The cap's literal value, pinned at its exact boundary and without sleeping
+// for thirty seconds.
+//
+// The trick is canWait: with a 50ms deadline on the request, a delay the code
+// actually adopted is one it cannot afford, so the loop returns the first
+// response immediately instead of waiting. So "was the header honoured?"
+// reads out as an attempt count, in microseconds. At exactly maxRetryAfter
+// the header wins and there is one attempt; one second past it, the policy's
+// zero backoff wins and there are two.
+func TestTheRetryAfterCapIsExactlyThirtySeconds(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		header       string
+		wantAttempts int64
+	}{
+		{"30", 1}, // exactly the cap: honoured, and too long for the deadline
+		{"31", 2}, // one second over: ignored, policy backoff of 0 applies
+	} {
+		var calls atomic.Int64
+		rt := resilience.Retry(resilience.Policy{
+			MaxAttempts: 2,
+			Backoff:     resilience.Constant(0),
+		})(rtFunc(func(*http.Request) (*http.Response, error) {
+			calls.Add(1)
+			r := respond(http.StatusServiceUnavailable)
+			r.Header.Set("Retry-After", tc.header)
+			return r, nil
+		}))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://x.invalid/", nil)
+		if err != nil {
+			cancel()
+			t.Fatalf("NewRequest: %v", err)
+		}
+		resp, err := rt.RoundTrip(req)
+		if err != nil {
+			cancel()
+			t.Fatalf("Retry-After %s: RoundTrip: %v", tc.header, err)
+		}
+		resp.Body.Close()
+		cancel()
+
+		if got := calls.Load(); got != tc.wantAttempts {
+			t.Errorf("Retry-After: %s -- attempts = %d, want %d (the cap is not exactly %v)", tc.header, got, tc.wantAttempts, 30*time.Second)
+		}
+	}
+}
