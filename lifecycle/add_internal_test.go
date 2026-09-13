@@ -110,3 +110,28 @@ func TestAddReportsEveryInvalidRefNotJustTheFirst(t *testing.T) {
 		t.Errorf(`err = %q, want "out of range" reported twice (once per invalid Ref, not just the first)`, err)
 	}
 }
+
+// TestNilFuncErrorJoinsWithRefError pins that a nil-StartFunc/StopFunc
+// construction error and a bad-Ref construction error accumulate in the same
+// l.errs slice and both survive errors.Join in Run, rather than one kind of
+// construction error clobbering or short-circuiting the other.
+func TestNilFuncErrorJoinsWithRefError(t *testing.T) {
+	t.Parallel()
+	noop := func(context.Context) error { return nil }
+
+	lc := New(Config{})
+	lc.Add("a", noop, noop)
+	lc.Add("bad-ref", noop, noop, After(Ref{owner: lc, i: 5}))
+	lc.Add("bad-nil", nil, noop)
+
+	err := lc.Run(context.Background())
+	if err == nil {
+		t.Fatal("Run accepted both a bad Ref and a nil StartFunc")
+	}
+	if !strings.Contains(err.Error(), "out of range") {
+		t.Errorf("err = %v, want the bad-Ref error", err)
+	}
+	if !strings.Contains(err.Error(), "bad-nil") {
+		t.Errorf("err = %v, want the nil-StartFunc error naming bad-nil", err)
+	}
+}
