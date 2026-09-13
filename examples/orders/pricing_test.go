@@ -54,11 +54,19 @@ func TestQuoteReturnsAZeroAmountWhenTheHTTPCallFails(t *testing.T) {
 	}
 }
 
+// The body is a well-formed, decodable success payload on purpose: an empty
+// body would also fail at the decode step below, so a status of 500 and an
+// empty body cannot tell "the status check rejected this" apart from "the
+// status check was skipped and decoding happened to fail anyway" -- which is
+// exactly the shape of the survivor go-mutesting found when the status
+// check's return was dropped and control fell through to a body that
+// decoded to a real amount.
 func TestQuoteReturnsAZeroAmountOnANonOKStatus(t *testing.T) {
 	t.Parallel()
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"amount_minor":999}`)
 	}))
 	defer upstream.Close()
 
