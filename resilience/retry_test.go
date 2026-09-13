@@ -551,7 +551,13 @@ func TestADiscardedResponseIsDrainedAndClosed(t *testing.T) {
 }
 
 // The returned response must NOT be drained -- the caller still needs it.
-func TestTheReturnedResponseIsNotDrained(t *testing.T) {
+// This covers only an unconditional-drain mutation (draining every response,
+// including the one handed back): the round-tripper here succeeds on the
+// first attempt, so the loop returns before ever reaching the canWait/drain
+// code, and this test cannot detect their relative order. That ordering
+// hazard is covered separately by
+// TestTheReturnedResponseIsNotDrainedWhenTheDeadlineIsExhausted.
+func TestAFirstAttemptSuccessIsReturnedUnconsumed(t *testing.T) {
 	t.Parallel()
 	rt := resilience.Retry(resilience.Policy{
 		MaxAttempts: 2,
@@ -609,13 +615,12 @@ func TestARequestWhoseBodyCannotBeRebuiltReturnsTheRebuildError(t *testing.T) {
 	}
 }
 
-// TestTheReturnedResponseIsNotDrained, as specified, sends a request that
-// succeeds on the very first attempt -- RetryIf is false immediately, so the
-// loop returns before ever reaching the canWait/drain code, regardless of
-// their order. It cannot catch the ordering hazard the code comment warns
-// about. This test exercises the path that can: a retryable first response
-// with a deadline too tight to retry into. If drain ran before the canWait
-// check, the response handed back here would already be closed and empty.
+// This is the counterpart to TestAFirstAttemptSuccessIsReturnedUnconsumed: a
+// retryable first response with a deadline too tight to retry into, so the
+// loop returns it via the canWait early-exit rather than the RetryIf
+// early-exit. If drain ran before the canWait check, the response handed
+// back here would already be closed and empty -- the ordering hazard the
+// code comment warns about.
 func TestTheReturnedResponseIsNotDrainedWhenTheDeadlineIsExhausted(t *testing.T) {
 	t.Parallel()
 	var calls atomic.Int64
