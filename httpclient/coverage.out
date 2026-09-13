@@ -1,0 +1,15 @@
+mode: set
+github.com/pavelpascari/svcrt/httpclient/client.go:71.37,94.28 3 1
+github.com/pavelpascari/svcrt/httpclient/client.go:94.28,96.3 1 0
+github.com/pavelpascari/svcrt/httpclient/client.go:98.2,98.59 1 1
+github.com/pavelpascari/svcrt/httpclient/client.go:101.51,102.12 1 1
+github.com/pavelpascari/svcrt/httpclient/client.go:102.12,104.3 1 1
+github.com/pavelpascari/svcrt/httpclient/client.go:105.2,105.10 1 1
+github.com/pavelpascari/svcrt/httpclient/client.go:108.26,109.12 1 1
+github.com/pavelpascari/svcrt/httpclient/client.go:109.12,111.3 1 1
+github.com/pavelpascari/svcrt/httpclient/client.go:112.2,112.10 1 1
+github.com/pavelpascari/svcrt/httpclient/middleware.go:28.41,29.56 1 1
+github.com/pavelpascari/svcrt/httpclient/middleware.go:29.56,30.37 1 1
+github.com/pavelpascari/svcrt/httpclient/middleware.go:30.37,32.4 1 1
+github.com/pavelpascari/svcrt/httpclient/middleware.go:33.3,33.14 1 1
+github.com/pavelpascari/svcrt/httpclient/middleware.go:45.78,45.93 1 1
