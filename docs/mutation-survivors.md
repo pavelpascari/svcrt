@@ -732,16 +732,16 @@ literal has no observer, not merely one the current tests happen to miss.
 
 ## `resilience` Module
 
-**Mutation Score: 0.938053 (106/113), with 100% statement coverage.** That
-figure is the last confirmed `go-mutesting` run, taken before the correction
-below was found -- its 7 raw survivors were the 5 still recorded here plus
-`backoff.go.10` and `backoff.go.17`, which the correction reclassifies from
-equivalent to real and now-killed. The gate has not been re-run since (it
-costs minutes per module), so 0.938053 is the last *measured* score, not
-necessarily the current one; the 5 that remain, all verified equivalent and
+**Mutation Score: 0.938053 (106/113), with 100% statement coverage.** This
+is the current, post-correction score -- measured on `0dccfa1`, the commit
+that killed `backoff.go.10` and `backoff.go.17` (see the correction below),
+and re-confirmed since. Before that fix the module scored 0.920354
+(104/113); killing those two mutants is exactly what moved the kill count
+from 104 to 106, and that +2 is visible evidence the correction below was a
+real fix, not bookkeeping. The 5 that remain, all verified equivalent and
 justified below, are `backoff.go.11`, `retryafter.go.1`, `retryafter.go.4`,
 `retryafter.go.10` and `retryafter.go.24`. Run `./scripts/mutation.sh
-resilience` for a current score and mutant total.
+resilience` to reproduce.
 
 **Two mutants were initially misclassified as equivalent here and are not
 anymore: `backoff.go.10` and `backoff.go.17`.** See the correction below --
@@ -942,11 +942,14 @@ whole number of seconds and would never exercise this boundary at all.
 ## `examples/orders` Module
 
 **Mutation Score: 0.968254 (61/63), with 2 surviving mutants -- both
-justified below as not economically killable, not as equivalent.** As of
-the R3 wiring of `resilience.Retry` into the pricing client
-(`c623990`/`3ab4a1f`/`52c4cf9`) those are two ±1ms mutations of the pricing
-retry policy's backoff literal in `stack.go`. Run `./scripts/mutation.sh
-examples/orders` for the current score and mutant total.
+justified below as not economically killable, not as equivalent.** The drop
+from R2's 1.000 is not a regression in existing tests: R3's wiring of
+`resilience.Retry` into the pricing client (`c623990`/`3ab4a1f`/`52c4cf9`)
+added a retry-policy literal in `stack.go` that did not exist before, and it
+is that new code, not any previously-passing mutant, that go-mutesting can
+now mutate. Those are two ±1ms mutations of the pricing retry policy's
+backoff literal. Run `./scripts/mutation.sh examples/orders` for the current
+score and mutant total.
 
 The same run first turned up two other survivors that *were* killed rather
 than justified: `MaxAttempts: 3` surviving a mutation to `4` (the existing
