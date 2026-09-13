@@ -19,7 +19,6 @@ const (
 	KeyMethod = "method"
 	KeyRoute  = "route"
 	KeyStatus = "status"
-	KeyCode   = "code"
 	KeyDurMS  = "duration_ms"
 )
 

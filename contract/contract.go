@@ -9,6 +9,14 @@
 // settled, treat every addition as a design review.
 package contract
 
+// KeyCode is the well-known log attribute key for a Coded error's code.
+//
+// It lives here rather than in a logging package because it names this
+// package's vocabulary: the value a caller puts under it is what Coded.Code
+// returns. A server-side log line and a client-side error can then be joined
+// on the same field.
+const KeyCode = "code"
+
 // APIV1 is a compile-time marker that generated code references.
 //
 // What it detects is narrower than it looks, and worth writing down before

@@ -339,7 +339,7 @@ func TestIDLengthBoundaryAtExactlyMax(t *testing.T) {
 	}
 }
 
-// logging.KeyCode had no producer anywhere in the repo. A well-known key
+// contract.KeyCode had no producer anywhere in the repo. A well-known key
 // nobody writes is a convention nobody follows, so writeError emits it on
 // both of its branches -- which is also what lets an operator join a
 // server-side line to the envelope a client received.
@@ -364,8 +364,8 @@ func TestWriteErrorLogsTheErrorCodeUnderTheWellKnownKey(t *testing.T) {
 		if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &line); err != nil {
 			t.Fatalf("%s: decode log %q: %v", tc.name, buf.String(), err)
 		}
-		if line[logging.KeyCode] != tc.wantCode {
-			t.Errorf("%s: %s = %v, want %q", tc.name, logging.KeyCode, line[logging.KeyCode], tc.wantCode)
+		if line[contract.KeyCode] != tc.wantCode {
+			t.Errorf("%s: %s = %v, want %q", tc.name, contract.KeyCode, line[contract.KeyCode], tc.wantCode)
 		}
 	}
 }
