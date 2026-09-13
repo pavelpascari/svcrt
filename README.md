@@ -17,6 +17,7 @@ never owns your process — you write `main()`.
 | `lifecycle` | Starts components in dependency order, stops them in reverse, and drains before it stops. Owns no signals — you pass it a context. |
 | `httpserver` | An `http.Server` with timeout defaults that are hard to get wrong, the three Kubernetes health gates, and an admin mux. |
 | `httpclient` | An `http.Client` with connection-pool and timeout defaults that are hard to get wrong, and a `RoundTripper` middleware seam mirroring `httpserver`'s. |
+| `resilience` | Retry with backoff and per-attempt timeouts, as `RoundTripper` middleware. Refuses to retry what it cannot safely replay. |
 
 Each is versioned independently, with a per-module tag prefix —
 `contract/v0.1.0`, `config/v0.1.0`. `contract` is *intended* to freeze at v1
@@ -63,9 +64,9 @@ versus keep and test it, and why a supplied test suite is a floor.
 
 ## Status
 
-R2. `contract`, `config`, `logging`, `lifecycle`, `httpserver`, and
-`httpclient` are implemented. `telemetry`, `resilience`, and `testkit` are
-planned — see `docs/superpowers/specs/`.
+R3. `contract`, `config`, `logging`, `lifecycle`, `httpserver`, `httpclient`,
+and `resilience` are implemented. `telemetry` and `testkit` are planned —
+see `docs/superpowers/specs/`.
 
 `health` was on that planned list and is not a module. R1 put the three
 probes inside `httpserver` instead: they are served over HTTP, a worker with
