@@ -43,13 +43,17 @@ func transportOf(t *testing.T, c *http.Client) *http.Transport {
 // What that stand-in does and does not catch, established by running it:
 // Pointer() returns a CODE pointer, so nil-ing a func field is caught, and
 // replacing it with a different function is caught (verified for both Proxy
-// and DialContext). What it cannot see is one method value replaced by
-// another method value of the SAME method on a different receiver -- every
-// (*net.Dialer).DialContext in the process shares one code pointer. Proxy is
-// a plain top-level func (http.ProxyFromEnvironment) so it has no such blind
-// spot; DialContext does, and no stdlib-only alternative closes it, since
-// evaluating a method value allocates a fresh closure each time and so cannot
-// be compared by address either. Recorded rather than papered over.
+// and DialContext). The bounded gap is one method value replaced by another
+// method value of the SAME method on a different receiver -- every
+// (*net.Dialer).DialContext in the process shares one code pointer. Proxy has
+// no such blind spot (http.ProxyFromEnvironment is a plain top-level func) and
+// ForceAttemptHTTP2 is a bool, so the two fields the review's sabotage
+// actually used are fully discriminated.
+//
+// A stdlib-only discriminator does exist: the stored field's funcval address,
+// read through unsafe.Pointer, is stable across reads and does change when the
+// receiver changes. It is declined deliberately -- unsafe plus a dependence on
+// runtime funcval layout is too high a price for a tripwire in a test.
 type transportSnapshot struct {
 	maxIdleConns          int
 	maxIdleConnsPerHost   int
