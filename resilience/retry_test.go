@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -738,5 +739,72 @@ func TestMaxAttemptsOfOneMeansNoRetries(t *testing.T) {
 
 	if got := calls.Load(); got != 1 {
 		t.Errorf("attempts = %d, want 1 -- an explicit MaxAttempts: 1 must not be overridden to the default", got)
+	}
+}
+
+// One Retry middleware, many goroutines. Retry(p) normalises p once at
+// construction and closes over the result, and every request through a client
+// shares that one closure -- so the shared state is real even though nothing
+// currently writes to it. Without a test that drives one middleware from
+// several goroutines at once, -race has nothing to watch, and the -count=10
+// gate conventions.md §5 applies to this module observes an empty suite: two
+// halves of one protection, each worthless alone.
+//
+// The methods are mixed on purpose. A GET reads p.RetryMethods, p.RetryIf,
+// p.Backoff and the Retry-After path on every one of its three attempts,
+// while a POST takes the ineligible early return -- so the concurrent reads
+// cover both branches of eligible rather than one hot loop.
+func TestOneRetryMiddlewareIsSafeUnderConcurrentUse(t *testing.T) {
+	t.Parallel()
+	const goroutines = 64
+	const perGoroutine = 8
+
+	var calls atomic.Int64
+	rt := resilience.Retry(resilience.Policy{
+		MaxAttempts: 3,
+		Backoff:     resilience.Constant(0),
+	})(rtFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		r := respond(http.StatusServiceUnavailable)
+		r.Header.Set("Retry-After", "0")
+		return r, nil
+	}))
+
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			method := http.MethodGet
+			if i%2 == 1 {
+				method = http.MethodPost
+			}
+			for j := 0; j < perGoroutine; j++ {
+				req, err := http.NewRequestWithContext(context.Background(), method, "http://x.invalid/", nil)
+				if err != nil {
+					t.Errorf("NewRequest: %v", err)
+					return
+				}
+				resp, err := rt.RoundTrip(req)
+				if err != nil {
+					t.Errorf("RoundTrip: %v", err)
+					return
+				}
+				resp.Body.Close()
+				if resp.StatusCode != http.StatusServiceUnavailable {
+					t.Errorf("StatusCode = %d, want 503", resp.StatusCode)
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// Half the goroutines send GETs (3 attempts each) and half send POSTs
+	// (1 attempt each), so the policy the shared closure holds is asserted,
+	// not just the absence of a race report.
+	want := int64(goroutines / 2 * perGoroutine * (3 + 1))
+	if got := calls.Load(); got != want {
+		t.Errorf("attempts = %d, want %d -- the shared policy did not apply uniformly across goroutines", got, want)
 	}
 }
