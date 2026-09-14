@@ -72,7 +72,16 @@ done
 # says very little about those -- coverage and mutation testing are both blind
 # to concurrency, so this is the one gate that catches it (conventions.md §5).
 # Everything else runs at -count=1; these run at -count=10.
-COUNT_MODULES=(lifecycle httpserver resilience)
+#
+# telemetry joined at R5 by judgement, NOT by the heuristic below: its
+# non-test source matches none of COUNT_CONCURRENCY_RE (no timer, no `go`,
+# no sync, no atomic -- `time.Now`/`time.Since` are deliberately not in that
+# regex). The heuristic would have stayed silent while Server and Client sat
+# on the request path, their middleware closures capturing one histogram and
+# one tracer shared by every concurrent request, and the recording stubs
+# shared across parallel subtests. That is the R3 failure shape exactly, and
+# it is the reason this line is written by hand rather than derived.
+COUNT_MODULES=(lifecycle httpserver resilience telemetry)
 
 # A module that looks concurrent by the heuristic below but is deliberately
 # NOT in COUNT_MODULES, as "<module>=<why>". Empty is the healthy state.
