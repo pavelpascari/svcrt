@@ -1,13 +1,24 @@
-go 1.25
+go 1.25.0
 
 use (
-	./contract
 	./config
-	./logging
-	./lifecycle
-	./httpserver
-	./httpclient
-	./resilience
+	./contract
 	./examples/orders
 	./examples/worker
+	./httpclient
+	./httpserver
+	./lifecycle
+	./logging
+	./resilience
+	./telemetry
+)
+
+replace (
+	github.com/pavelpascari/svcrt/config v0.0.0 => ./config
+	github.com/pavelpascari/svcrt/contract v0.0.0 => ./contract
+	github.com/pavelpascari/svcrt/httpclient v0.0.0 => ./httpclient
+	github.com/pavelpascari/svcrt/httpserver v0.0.0 => ./httpserver
+	github.com/pavelpascari/svcrt/lifecycle v0.0.0 => ./lifecycle
+	github.com/pavelpascari/svcrt/logging v0.0.0 => ./logging
+	github.com/pavelpascari/svcrt/resilience v0.0.0 => ./resilience
 )
