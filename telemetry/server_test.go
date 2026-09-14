@@ -67,6 +67,49 @@ func TestServerSpanIsNamedForTheRouteNotThePath(t *testing.T) {
 	}
 }
 
+// TestServerSpanNameDoesNotDoublePrependForMethodfulPattern pins the same
+// name assertion as TestServerSpanIsNamedForTheRouteNotThePath but states the
+// invariant it exists to protect explicitly: when the registered pattern
+// already carries a method ("GET /orders/{id}"), the span name must equal the
+// pattern verbatim, never "GET GET /orders/{id}".
+func TestServerSpanNameDoesNotDoublePrependForMethodfulPattern(t *testing.T) {
+	tp := &recordingTracerProvider{}
+	req := httptest.NewRequest(http.MethodGet, "/orders/123", nil)
+
+	serve(t, tp, &recordingMeterProvider{}, "GET /orders/{id}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}, req)
+
+	name := tp.recorded()[0].name
+	if strings.Count(name, http.MethodGet) != 1 {
+		t.Fatalf("span name = %q, method appears %d times, want exactly 1", name, strings.Count(name, http.MethodGet))
+	}
+	if name != "GET /orders/{id}" {
+		t.Errorf("span name = %q, want %q", name, "GET /orders/{id}")
+	}
+}
+
+// TestServerSpanNameGainsMethodForMethodlessPattern is the fix under test: a
+// route registered WITHOUT a method (mux.Handle("/admin/{x}", h)) yields
+// r.Pattern="/admin/{x}" with no method component at all. Naming the span
+// r.Pattern verbatim in that case collapses every method to one trace UI
+// span name -- OTel semantic conventions want "{method} {route}", so the
+// method has to be added back for exactly the patterns that never carried
+// one.
+func TestServerSpanNameGainsMethodForMethodlessPattern(t *testing.T) {
+	tp := &recordingTracerProvider{}
+	req := httptest.NewRequest(http.MethodPut, "/admin/5", nil)
+
+	serve(t, tp, &recordingMeterProvider{}, "/admin/{x}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}, req)
+
+	name := tp.recorded()[0].name
+	if want := "PUT /admin/{x}"; name != want {
+		t.Errorf("span name = %q, want %q", name, want)
+	}
+}
+
 // TestServerUnmatchedRouteDoesNotNameTheSpanForThePath: a 404 has no pattern.
 // Falling back to the raw path would reintroduce unbounded cardinality on
 // exactly the URLs a scanner can generate at will.

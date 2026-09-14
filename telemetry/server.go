@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -46,6 +47,22 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 }
 
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// routeHasMethodPrefix reports whether pattern's method component is present,
+// per net/http.ServeMux's pattern syntax: "[METHOD ][HOST]/PATH". A method,
+// when present, is exactly the text before the pattern's first space and
+// never contains "/"; a method-less pattern begins directly with the host or
+// the path, either of which contains a "/" before any space could occur (a
+// bare path always starts with one). Checking for a "/" ahead of the first
+// space is therefore enough to tell the two cases apart without needing to
+// know which method string to look for.
+func routeHasMethodPrefix(pattern string) bool {
+	i := strings.IndexByte(pattern, ' ')
+	if i < 0 {
+		return false
+	}
+	return !strings.Contains(pattern[:i], "/")
+}
 
 // Server returns middleware that extracts inbound trace context, records a
 // server span, and reports request duration.
@@ -95,12 +112,28 @@ func Server(o Options) func(http.Handler) http.Handler {
 				attrs := make([]attribute.KeyValue, 0, 3)
 				attrs = append(attrs, semconv.HTTPRequestMethodKey.String(r.Method))
 
-				// r.Pattern is the verbatim registered ServeMux pattern, which
-				// already carries the method when registered as "GET /x" --
-				// matching svcrt/httpserver.AccessLog's KeyRoute convention.
-				// Prepending r.Method here would double it up.
+				// The span NAME follows OTel semantic conventions:
+				// "{method} {route}". r.Pattern already carries the method
+				// when registered as "GET /x" -- prepending r.Method there
+				// would double it up -- but a route registered without one
+				// ("/admin/{x}") carries no method at all, which collapses
+				// every method to one span name in a trace UI.
+				// routeHasMethodPrefix tells the two cases apart so the
+				// method is added back for exactly the patterns that never
+				// had one.
+				//
+				// The http.route attribute below, and semconv.HTTPRoute,
+				// stay r.Pattern verbatim on purpose: they match
+				// svcrt/httpserver.AccessLog's KeyRoute convention, so a
+				// trace's route attribute and an access log line for the
+				// same request read identically. Only the span's display
+				// NAME follows the OTel naming convention instead.
 				if r.Pattern != "" {
-					span.SetName(r.Pattern)
+					name := r.Pattern
+					if !routeHasMethodPrefix(name) {
+						name = r.Method + " " + name
+					}
+					span.SetName(name)
 					attrs = append(attrs, semconv.HTTPRoute(r.Pattern))
 				}
 				// written is false when the handler panicked before writing:
