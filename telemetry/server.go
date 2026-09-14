@@ -73,8 +73,14 @@ func routeHasMethodPrefix(pattern string) bool {
 //
 // Compose it OUTSIDE svcrt/httpserver.AccessLog. The access-log line is
 // emitted by the handler AccessLog wraps, so the span has to already be in the
-// context by then; inverted, the line simply carries no trace_id and nothing
-// complains.
+// context by then.
+//
+// Inverting the order costs more than the trace id. This middleware rebinds
+// the request to the span context, and ServeMux records the matched pattern on
+// whichever request instance it is handed -- the rebound one. An AccessLog
+// sitting outside still closes over the ORIGINAL request, whose Pattern is
+// therefore never set, so the line loses its route as well. The exemplar's
+// TestAcceptanceLogLineCarriesRouteAndStatus is what catches the inversion.
 func Server(o Options) func(http.Handler) http.Handler {
 	prop := o.propagator()
 	tracer := o.tracer()

@@ -314,8 +314,16 @@ c := httpclient.New(httpclient.Options{
 is emitted by the handler `AccessLog` wraps, so the span has to be in the
 context by then. R4 confirmed the mechanism — `AccessLog` calls
 `l.LogAttrs(r.Context(), ...)`, so the request context reaches the handler and
-the extractor runs against it. Inverted, the access log line simply has no
-`trace_id`, and nothing complains.
+the extractor runs against it.
+
+**Inverting it costs more than the trace id, which R5's implementation
+established rather than the design predicting it.** `Server` rebinds the
+request to the span context, and `ServeMux` records the matched pattern on the
+request instance it is handed — the rebound one. An `AccessLog` composed
+outside still closes over the original request, whose `Pattern` is never set,
+so the line loses its **route** too. This design document originally claimed
+the inversion was silent; it is not, and `examples/orders`'
+`TestAcceptanceLogLineCarriesRouteAndStatus` fails on it.
 
 `telemetry.Client` inside `resilience.Retry` gives one span per attempt, which
 is the useful arrangement: a retried call shows three spans, and the two that
