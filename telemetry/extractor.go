@@ -3,7 +3,9 @@ package telemetry
 import (
 	"context"
 	"log/slog"
+	"slices"
 
+	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -26,11 +28,10 @@ import (
 // reports all-zero ids rather than failing, so skipping it would stamp a
 // well-formed but false trace_id on every log line emitted outside a request.
 func LogExtractor(baggageKeys ...string) func(context.Context) []slog.Attr {
-	// NOTE (Task 2 only): baggageKeys is accepted but unused until Task 3.
-	// Do NOT add `keys := slices.Clone(baggageKeys)` here -- an unused local
-	// is a compile error in Go, and Task 3 adds the clone together with the
-	// loop that reads it. The `slices` import arrives in Task 3 for the same
-	// reason.
+	// Clone so a caller mutating their slice afterwards cannot change which
+	// baggage members this extractor trusts.
+	keys := slices.Clone(baggageKeys)
+
 	return func(ctx context.Context) []slog.Attr {
 		var attrs []slog.Attr
 
@@ -39,6 +40,17 @@ func LogExtractor(baggageKeys ...string) func(context.Context) []slog.Attr {
 				slog.String(KeyTraceID, sc.TraceID().String()),
 				slog.String(KeySpanID, sc.SpanID().String()),
 			)
+		}
+
+		// Looked up per record rather than cached: baggage is per-request,
+		// and this extractor outlives any one request.
+		if len(keys) > 0 {
+			b := baggage.FromContext(ctx)
+			for _, k := range keys {
+				if v := b.Member(k).Value(); v != "" {
+					attrs = append(attrs, slog.String(k, v))
+				}
+			}
 		}
 
 		return attrs

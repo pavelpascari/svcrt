@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -98,5 +99,105 @@ func TestLogExtractorDoesNotPanic(t *testing.T) {
 			}()
 			LogExtractor("tenant_id", "absent")(ctx)
 		})
+	}
+}
+
+// ctxWithBaggage attaches two members so allowlist tests can prove the
+// non-allowlisted one is dropped rather than merely that the allowlisted one
+// is present.
+func ctxWithBaggage(t *testing.T, ctx context.Context) context.Context {
+	t.Helper()
+	tenant, err := baggage.NewMember("tenant_id", "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, err := baggage.NewMember("internal_debug", "leak-me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := baggage.New(tenant, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return baggage.ContextWithBaggage(ctx, b)
+}
+
+func TestLogExtractorEmitsAllowlistedBaggage(t *testing.T) {
+	ctx := ctxWithBaggage(t, ctxWithSpan(t))
+	attrs := LogExtractor("tenant_id")(ctx)
+
+	v, ok := attrValue(attrs, "tenant_id")
+	if !ok {
+		t.Fatalf("tenant_id missing from %v", attrs)
+	}
+	if got := v.String(); got != "acme" {
+		t.Errorf("tenant_id = %q", got)
+	}
+}
+
+// TestLogExtractorDropsNonAllowlistedBaggage is the security-relevant half.
+// Baggage is attacker-controllable on any request that reaches this service.
+func TestLogExtractorDropsNonAllowlistedBaggage(t *testing.T) {
+	ctx := ctxWithBaggage(t, ctxWithSpan(t))
+	attrs := LogExtractor("tenant_id")(ctx)
+
+	if _, ok := attrValue(attrs, "internal_debug"); ok {
+		t.Fatalf("non-allowlisted baggage member leaked into %v", attrs)
+	}
+}
+
+// TestLogExtractorWithNoAllowlistEmitsNoBaggage proves the safe default is the
+// one you get by writing nothing.
+func TestLogExtractorWithNoAllowlistEmitsNoBaggage(t *testing.T) {
+	ctx := ctxWithBaggage(t, ctxWithSpan(t))
+	attrs := LogExtractor()(ctx)
+
+	if _, ok := attrValue(attrs, "tenant_id"); ok {
+		t.Fatalf("baggage emitted with an empty allowlist: %v", attrs)
+	}
+	if len(attrs) != 2 {
+		t.Errorf("expected exactly trace_id and span_id, got %v", attrs)
+	}
+}
+
+// TestLogExtractorSkipsAbsentAllowlistedKey: an allowlisted key that is not in
+// the baggage must be omitted, not emitted empty.
+func TestLogExtractorSkipsAbsentAllowlistedKey(t *testing.T) {
+	ctx := ctxWithBaggage(t, ctxWithSpan(t))
+	attrs := LogExtractor("tenant_id", "never_set")(ctx)
+
+	if _, ok := attrValue(attrs, "never_set"); ok {
+		t.Fatalf("absent baggage key emitted as an attribute: %v", attrs)
+	}
+}
+
+// TestLogExtractorEmitsBaggageWithoutASpan: baggage and span context are
+// independent. A request with baggage but no traceparent still gets its
+// allowlisted members.
+func TestLogExtractorEmitsBaggageWithoutASpan(t *testing.T) {
+	ctx := ctxWithBaggage(t, context.Background())
+	attrs := LogExtractor("tenant_id")(ctx)
+
+	if _, ok := attrValue(attrs, KeyTraceID); ok {
+		t.Error("trace_id emitted without a valid span context")
+	}
+	if _, ok := attrValue(attrs, "tenant_id"); !ok {
+		t.Fatalf("baggage dropped when no span was present: %v", attrs)
+	}
+}
+
+// TestLogExtractorCopiesTheAllowlist: mutating the caller's slice afterwards
+// must not change which members are trusted.
+func TestLogExtractorCopiesTheAllowlist(t *testing.T) {
+	keys := []string{"tenant_id"}
+	ex := LogExtractor(keys...)
+	keys[0] = "internal_debug"
+
+	attrs := ex(ctxWithBaggage(t, ctxWithSpan(t)))
+	if _, ok := attrValue(attrs, "internal_debug"); ok {
+		t.Fatal("mutating the caller's slice changed the allowlist")
+	}
+	if _, ok := attrValue(attrs, "tenant_id"); !ok {
+		t.Fatal("allowlist did not survive mutation of the caller's slice")
 	}
 }
