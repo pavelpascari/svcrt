@@ -22,7 +22,9 @@ func Server(o Options) func(http.Handler) http.Handler
 func Client(o Options) func(http.RoundTripper) http.RoundTripper
 
 type Options struct {
-	Propagator propagation.TextMapPropagator // nil -> TraceContext + Baggage
+	Propagator     propagation.TextMapPropagator // nil -> TraceContext + Baggage
+	TracerProvider trace.TracerProvider          // nil -> otel.GetTracerProvider()
+	MeterProvider  metric.MeterProvider          // nil -> otel.GetMeterProvider()
 }
 
 const (
@@ -31,18 +33,19 @@ const (
 )
 ```
 
-`Server` extracts inbound trace context and starts a server span. `Client`
-starts a client span and injects trace context outbound. `LogExtractor` reads
-whatever span is in the context and turns it into log attributes. Together they
-close the loop: a `traceparent` arriving on an inbound request appears in this
-service's log lines and on its outbound calls.
+`Server` extracts inbound trace context, starts a server span, and records the
+request duration. `Client` starts a client span, injects trace context
+outbound, and records its own duration. `LogExtractor` reads whatever span is in
+the context and turns it into log attributes. Together they close the loop: a
+`traceparent` arriving on an inbound request appears in this service's log
+lines, on its metrics, and on its outbound calls.
+
+Traces and metrics live in the **same** middleware rather than in separate ones.
+They need the same thing — the response status, which means wrapping the
+`ResponseWriter` — and splitting them would wrap it twice to learn the same
+fact. It is also what the ecosystem does: `otelhttp.NewHandler` emits both.
 
 ### 1.1 Out of scope
-
-**Metrics.** Not because of dependency weight — §2.1 measured that excluding
-`otel/metric` saves nothing, it arrives as an indirect dependency either way —
-but because metrics are a different instrument with a different lifecycle, and
-bundling them means designing two things under one milestone's attention.
 
 **SDK wiring.** `telemetry` depends on the OTel *API* only. Choosing an
 exporter, sampler and resource is an application decision with an application's
@@ -72,15 +75,22 @@ assumed (§7.1).
 ### 2.1 What it costs, measured
 
 ```
-require go.opentelemetry.io/otel       v1.46.0
-require go.opentelemetry.io/otel/trace v1.46.0
+require go.opentelemetry.io/otel        v1.46.0
+require go.opentelemetry.io/otel/trace  v1.46.0
+require go.opentelemetry.io/otel/metric v1.46.0
 
-indirect: otel/metric, auto/sdk, go-logr/logr, go-logr/stdr, cespare/xxhash/v2
+indirect: auto/sdk, go-logr/logr, go-logr/stdr, cespare/xxhash/v2
 ```
 
-Two direct requires, five indirect. Naming `otel/metric` directly would change
-nothing — `otel` pulls it regardless — which is why §1.1's exclusion of metrics
-is an API-surface argument and not a dependency-weight one.
+Three direct requires, four indirect — **seven modules**, which is the same
+seven a tracing-only build pulls. `otel` requires `otel/metric` regardless, so
+adding metrics moved one module from the indirect column to the direct one and
+cost nothing else. That measurement is why metrics are in this milestone rather
+than deferred: the usual reason to split them off does not apply.
+
+`propagation`, `attribute`, `codes` and `semconv` are packages **within** the
+`otel` module, not separate requires. `metric/noop` (§3.3) is within
+`otel/metric`.
 
 ## 3. Three functions, and why each is shaped the way it is
 
@@ -155,10 +165,72 @@ site, and the request still succeeds. `Client` clones.
 what this repo already does — `httpclient.Options`, `resilience.Policy` — and
 the zero value is the intended configuration.
 
-## 4. Two globals, and why only one of them is acceptable
+### 3.3 Metrics: one instrument per side, and why one is enough
 
-OTel has two process-wide registrations. `telemetry` treats them differently,
-and the asymmetry is deliberate.
+```
+http.server.request.duration   histogram, unit "s", float64
+  http.request.method, http.route, http.response.status_code
+
+http.client.request.duration   histogram, unit "s", float64
+  http.request.method, server.address, http.response.status_code
+```
+
+Names, units and attribute keys come from OTel's HTTP semantic conventions via
+`semconv`, which is a package inside the `otel` module — so the convention
+costs no dependency and the names are not ours to invent.
+
+**One histogram covers RED.** A duration histogram carries a count, so request
+*rate* falls out of it; `http.response.status_code` is an attribute, so the
+*error* rate is a filter on the same series; and the distribution is the
+*duration*. A separate request counter would be a second instrument deriving a
+number the first one already has. In-flight gauges, request and response body
+sizes are all opt-in in the OTel spec itself and none are added here.
+
+**The attributes are chosen for bounded cardinality, and that is the whole
+design.** `http.route` is `r.Pattern` — the registered pattern, never
+`r.URL.Path` — for exactly the reason `httpserver.AccessLog` already documents
+at length: paths contain identifiers and a per-identifier time series is how a
+metrics backend dies. Client-side, `server.address` is the host alone, never the
+full URL, for the same reason. Status code is an integer from a small set.
+
+**A deliberate unit mismatch worth not "fixing".** `httpserver.AccessLog`
+records `duration_ms` in milliseconds; this histogram records seconds. The log
+attribute is read by humans, where milliseconds are natural. The metric follows
+semconv, which specifies seconds, because dashboards and alerting rules are
+written against the convention and a service that emits a differently-scaled
+`http.server.request.duration` is silently wrong on every shared dashboard.
+They disagree on purpose.
+
+**Instrument creation is fallible, and the returned instrument is not
+guaranteed usable.** `Meter.Float64Histogram` returns `(Float64Histogram,
+error)`, and the interface documentation promises nothing about the instrument
+when the error is non-nil — it does not say a usable no-op is returned. Assuming
+one would be an unverified assumption on the request path, where the cost of
+being wrong is a nil-pointer panic per request.
+
+So on a non-nil error the middleware substitutes an explicit
+`metric/noop` instrument. The branch is testable without an SDK: `noop.Meter` is
+a struct, so a stub is four lines —
+
+```go
+type errMeter struct{ noop.Meter }
+
+func (errMeter) Float64Histogram(string, ...metric.Float64HistogramOption) (metric.Float64Histogram, error) {
+	return nil, errors.New("boom")
+}
+```
+
+— which returns exactly the `(nil, error)` pair the contract permits and the
+naive code would dereference.
+
+## 4. Three process-wide registrations, and why only the propagator is owned
+
+OTel has three process-wide registrations in play. `telemetry` treats the
+propagator differently from the two providers, and the asymmetry is deliberate.
+
+All three are `Options` fields defaulting to the global, so tests inject
+directly and never touch process state — a test that sets a global provider
+pollutes every test after it in the same binary.
 
 ### 4.1 The propagator is owned, not read from the global
 
@@ -185,16 +257,19 @@ their own.
 This also matches the rest of the repo, which has no globals: `logging.New`,
 `httpclient.New` and `lifecycle` are all explicitly constructed.
 
-### 4.2 The TracerProvider is read from the global, and its no-op default is correct
+### 4.2 The two providers default to the global, and their no-op default is correct
 
-`telemetry` gets its tracer from `otel.Tracer(...)`, which reads the global
-provider the application's SDK installs. With no SDK, that provider is a no-op —
+`telemetry` gets its tracer and meter from the global providers the
+application's SDK installs. With no SDK, both are no-ops —
 and unlike the propagator, **this is a meaningful state rather than a broken
 one**: "this service is not exporting traces" is a legitimate thing to be, and
 it is the state every consumer starts in.
 
-What makes it affordable is a property worth stating explicitly, because it is
-not obvious. Measured:
+Measured, a no-op meter hands back a usable instrument and recording on it is a
+no-op that does not panic — so an unconfigured service pays almost nothing.
+
+What makes the tracing side affordable is a property worth stating explicitly,
+because it is not obvious. Measured:
 
 ```
 no-SDK Start()            -> valid=false recording=false
@@ -266,9 +341,11 @@ milestone undoing.
 
 ## 7. Acceptance criteria
 
-1. `telemetry/go.mod` requires `go.opentelemetry.io/otel` and
-   `go.opentelemetry.io/otel/trace` and **nothing else** directly; the module
-   builds and tests standalone under `GOWORK=off`.
+**Module and boundaries**
+
+1. `telemetry/go.mod` directly requires `go.opentelemetry.io/otel`,
+   `go.opentelemetry.io/otel/trace` and `go.opentelemetry.io/otel/metric`, and
+   **nothing else**; the module builds and tests standalone under `GOWORK=off`.
 2. Every other **library** module still has **zero** require directives,
    asserted by a check that fails if one gains a dependency — not by reading
    the files. The exemplars under `examples/` are exempt: they import
@@ -281,32 +358,60 @@ milestone undoing.
    for `Server`/`Client` against `httpserver.Middleware` and
    `httpclient.Middleware`. The checks live in the exemplar, which may import
    everything.
-5. `LogExtractor` returns nil for a context with no span, and specifically does
-   **not** emit all-zero `trace_id`/`span_id`.
-6. `LogExtractor` does not panic on: a context with no span, a context with no
-   baggage, an allowlisted key absent from baggage, and `context.Background()`.
-7. `Client` does not mutate the request it is given — asserted by holding the
-   original request and checking it has no `traceparent` after the round trip.
-8. `Server` extracts an inbound `traceparent` and the resulting context carries
-   a valid, remote span context with the inbound trace ID.
-9. Baggage: `LogExtractor()` emits no baggage attributes even when baggage is
+
+**`LogExtractor`**
+
+5. Returns nil for a context with no span, and specifically does **not** emit
+   all-zero `trace_id`/`span_id`.
+6. Does not panic on: a context with no span, a context with no baggage, an
+   allowlisted key absent from baggage, and `context.Background()`.
+7. Baggage: `LogExtractor()` emits no baggage attributes even when baggage is
    present; `LogExtractor("tenant_id")` emits that one and **not** a
    non-allowlisted key present in the same baggage header.
+
+**Tracing**
+
+8. `Server` extracts an inbound `traceparent` and the resulting context carries
+   a valid, remote span context with the inbound trace ID.
+9. `Client` does not mutate the request it is given — asserted by holding the
+   original request and checking it has no `traceparent` after the round trip.
 10. Order: a test fails if `telemetry.Server` is composed inside
     `httpserver.AccessLog` rather than outside — the access-log line must carry
     `trace_id`.
-11. End-to-end in `examples/orders`, with **no SDK**: an inbound request
+
+**Metrics**
+
+11. `Server` records `http.server.request.duration` in **seconds** with unit
+    `"s"`, carrying `http.request.method`, `http.route` and
+    `http.response.status_code`. `Client` records
+    `http.client.request.duration` carrying `http.request.method`,
+    `server.address` and `http.response.status_code`.
+12. `http.route` is the registered pattern, not the request path: a request to
+    `/orders/123` matched by `/orders/{id}` records `/orders/{id}`. Client-side,
+    `server.address` is the host without scheme, port-path or query.
+13. A `Meter` whose `Float64Histogram` returns `(nil, error)` does not produce a
+    nil instrument and does not panic on the request path — the no-op fallback
+    is exercised by a stub, not asserted by inspection.
+14. Recording happens on the error path too: a `RoundTrip` that returns an error
+    still records a client duration, and a handler that panics still records a
+    server duration.
+15. Metrics assertions are made against an injected `MeterProvider`, not a
+    global, and no test mutates process-wide OTel state.
+
+**Integration and gates**
+
+16. End-to-end in `examples/orders`, with **no SDK**: an inbound request
     carrying a `traceparent` produces a log line with that trace ID, and the
     outbound upstream call carries a `traceparent` with the same trace ID.
-12. `telemetry` is added to `COUNT_MODULES` in `scripts/lib.sh` and passes
+17. `telemetry` is added to `COUNT_MODULES` in `scripts/lib.sh` and passes
     `-race -count=10`.
-13. 100% statement coverage on `telemetry`; mutation score at or above the 0.85
+18. 100% statement coverage on `telemetry`; mutation score at or above the 0.85
     floor, with every survivor killed or justified in
     `docs/mutation-survivors.md`.
-14. `conventions.md` amended in place: zero-requires stated as a core-modules
+19. `conventions.md` amended in place: zero-requires stated as a core-modules
     rule with `telemetry` named as the exception, and no surviving sentence
     claiming the rule is project-wide.
-15. `./scripts/ci.sh` exits 0 across all 10 modules; `go vet` clean; `gofmt`
+20. `./scripts/ci.sh` exits 0 across all 10 modules; `go vet` clean; `gofmt`
     silent.
 
 ## 8. Testing notes
@@ -329,14 +434,18 @@ a custom propagator that writes a header W3C does not — so the default and the
 override are distinguishable.
 
 **No SDK anywhere in the test suite** (§4.2). If a test reaches for
-`otel/sdk/trace`, that is a signal the behaviour under test is the SDK's rather
-than this module's.
+`otel/sdk/trace` or `otel/sdk/metric`, that is a signal the behaviour under
+test is the SDK's rather than this module's. Metrics are asserted through a
+stub `MeterProvider` that captures recorded measurements — the same shape as
+the `errMeter` stub in §3.3, and equally small because `noop` is embeddable.
 
 ## 9. Deviations from the parent spec
 
 1. **`telemetry` is API-only.** The parent implies a telemetry module without
    distinguishing API from SDK. §1.1 and §4.2 make the split and explain the
-   cost.
+   cost. Metrics and traces ship together in one middleware per side (§1),
+   because they need the same response-status plumbing and cost the same seven
+   dependency modules either way (§2.1).
 2. **The zero-requires rule narrows to core modules.** Recorded because it is a
    project-wide invariant being changed, not a new module's local choice.
 3. **No `request_id`.** The parent does not specify one; R4 §9 asked R5 to
