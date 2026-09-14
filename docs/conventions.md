@@ -135,6 +135,22 @@ it returns `httpserver.Middleware`, a *named* type, and that is fine
 precisely because `AccessLog` lives in `httpserver` itself — the same-package
 case this rule exists to distinguish from `resilience`'s cross-package one.
 
+R5's `telemetry` is the **second** module to need that rule, and it needs it
+three times over in one package: `Server` returns the bare
+`func(http.Handler) http.Handler`, `Client` the bare
+`func(http.RoundTripper) http.RoundTripper`, and `LogExtractor` the bare
+`func(context.Context) []slog.Attr`. They are assignable to
+`httpserver.Middleware`, `httpclient.Middleware` and `logging.Extractor`
+respectively while `telemetry` imports none of those three modules — which it
+must not, because it is the one module carrying dependencies (§11) and a
+service adopting `logging` alone must not inherit OpenTelemetry through it.
+`LogExtractor` extends the rule past middleware: the shape being targeted is a
+plain extractor function, but the Go fact underneath is identical, so the same
+answer applies to any exported constructor returning a func type owned by a
+package it does not import. `examples/orders/telemetry_test.go` asserts all
+three at compile time, which is the only place the assignability can be
+checked — inside `telemetry` there is nothing to assign to.
+
 ## 3. Dead code: when to delete a clause and when to keep and test it
 
 The rule, arrived at three times during R0 and settled at the third:
@@ -336,3 +352,69 @@ the restore is exact and the experiment is free.
 and a reviewer can accept one while questioning the other. Squashed together
 they read as a single confident step, which is the shape least likely to get
 the survivor argument actually checked.
+
+## 11. Core modules have zero dependencies; `telemetry` is the one exception
+
+`contract`, `config`, `logging`, `lifecycle`, `httpserver`, `httpclient` and
+`resilience` have **zero `require` directives**. A service can adopt any one of
+them without inheriting anything. This had never been written down — five
+milestones enforced it by habit, and `grep` finds no section stating it —
+which was survivable only while no module ever wanted an exception.
+
+`telemetry` requires the OpenTelemetry API — `otel`, `otel/trace`,
+`otel/metric` — and is the only module that does. (`propagation`,
+`attribute`, `codes`, `semconv` and `baggage` are packages inside `otel`;
+`metric/noop` is inside `otel/metric`. Three requires, not eight.)
+
+The rule was never "no dependencies ever". It was "adopting a core module costs
+you nothing", which holds exactly as well when the module you inherit OTel from
+is the one whose entire job is speaking OTel. A tracing library that refused to
+depend on a tracing API would reimplement W3C tracecontext, which is not
+independence but a second, worse implementation of a standard.
+
+The exemption is for the **API**, never the SDK. Choosing an exporter, sampler
+and resource is an application decision with an application's lifetime, and a
+library that makes it takes the choice away from every consumer. No test in
+`telemetry` imports `otel/sdk/*`; tests inject stub providers instead.
+
+The exception is also why §2's unnamed-func-type rule is load-bearing rather
+than stylistic here. If `telemetry` could import `logging`, `httpserver` and
+`httpclient` to name its return types, then adopting `logging` would drag
+OpenTelemetry in behind it — not because `logging` wanted it, but because of
+which direction the import happened to point.
+
+### How it is enforced
+
+Not by this section. `scripts/ci.sh` asserts it per module, and it asserts
+**both directions**:
+
+- A module **not** in `DEP_EXEMPT` must produce exactly one line from
+  `GOWORK=off go list -m all` — itself, and nothing else.
+- A module **in** `DEP_EXEMPT` must produce **more than one**. An exemption
+  for a module that has quietly gone dependency-free is a stale exemption, and
+  a stale exemption is a lie in the gate: it reads as a considered decision
+  while permitting anything.
+
+`DEP_EXEMPT` lives in `scripts/lib.sh` and is shaped `<module>=<why>`, a
+sentence and not a bare name, for the same reason `COUNT_EXEMPT` is (§5): once
+a list is just names, "someone forgot" and "someone decided" become
+indistinguishable. `lib.sh` additionally asserts, forward, that every entry
+names a module that exists on disk and carries a reason; the inverse half
+needs `go list -m all` and so lives in the loop that already pays for that
+call, reached through `dep_exempt_reason`.
+
+`scripts/release.sh` applies the same two-way check through the same
+`dep_exempt_reason`, for the reason §5 gives about `-count`: tagging is the
+point after which a version is permanent, so it is the last place the policy
+can be enforced and must not be weaker there than in CI. It was weaker until
+R5 — it carried the original unguarded `[ "$n" -eq 1 ]` and would have refused
+to tag `telemetry` forever. Nothing caught that, because no module has been
+tagged yet, so the bug had no way to surface until the first person tried to
+cut a `telemetry` release. Both scripts now read one list.
+
+### Adding a second exception
+
+A design change, not a judgement call. It needs the same argument this one
+got, written down here, plus its `DEP_EXEMPT` entry. "It only pulls in one
+small library" is not that argument: the cost is paid by every service that
+adopts the module, and they are not in the room.

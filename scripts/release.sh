@@ -61,7 +61,21 @@ if ! n=$(cd "$module" && GOWORK=off go list -m all | wc -l | tr -d ' '); then
   echo "$module: 'go list -m all' failed; refusing to tag" >&2
   exit 1
 fi
-[ "$n" -eq 1 ] || { echo "$module has module dependencies; refusing to tag" >&2; exit 1; }
+# Exactly one line -- the module itself -- unless the module is named in
+# DEP_EXEMPT (lib.sh), in which case the assertion flips: it must have MORE
+# than one line, because an exemption for a module that has quietly gone
+# dependency-free is a stale exemption, and a stale exemption is a lie in the
+# gate. Same two-way shape as ci.sh, reading the same list through the same
+# dep_exempt_reason -- a second copy of the exempt names here is how this
+# check drifted from ci.sh's in the first place.
+if reason=$(dep_exempt_reason "$module"); then
+  [ "$n" -gt 1 ] || {
+    echo "$module: DEP_EXEMPT says '$reason', but 'go list -m all' now returns $n line(s) -- $module is dependency-free again. Remove the now-false exemption from DEP_EXEMPT in scripts/lib.sh. Refusing to tag." >&2
+    exit 1
+  }
+else
+  [ "$n" -eq 1 ] || { echo "$module has module dependencies ($n lines from 'go list -m all'); refusing to tag" >&2; exit 1; }
+fi
 
 git tag -a "$tag" -m "$tag"
 echo
