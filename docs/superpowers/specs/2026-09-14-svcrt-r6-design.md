@@ -38,8 +38,9 @@ the property that makes adopting it safe.
 
 ## 2. `kit` is the second module allowed to import, and the first to import siblings
 
-Today **no** svcrt library module imports another. `kit` imports five:
-`httpclient`, `resilience`, `telemetry`, `httpserver`, `logging`.
+Today **no** svcrt library module imports another. `kit` imports four:
+`httpclient`, `resilience`, `telemetry`, `logging`. It deliberately does not
+import `httpserver` (§4.2).
 
 R5 set the precedent: the zero-requires rule narrowed to core modules because
 `telemetry`'s whole job required OTel. The same argument applies with the same
@@ -66,11 +67,6 @@ type ClientOptions struct {
 	Telemetry telemetry.Options
 }
 
-type HandlerOptions struct {
-	Logger    *slog.Logger
-	Telemetry telemetry.Options
-}
-
 type LoggerOptions struct {
 	Logging logging.Options
 	Baggage []string
@@ -91,7 +87,6 @@ real types and can move to them directly.
 
 ```go
 func NewClient(o ClientOptions) *http.Client
-func Handler(h http.Handler, o HandlerOptions) http.Handler
 func NewLogger(w io.Writer, o LoggerOptions) *slog.Logger
 ```
 
@@ -112,20 +107,27 @@ would run once and be replayed stale on attempts two and three. Inside
 `telemetry.Client` it is also inside the span, so the work it does is attributed
 to the attempt that did it.
 
-### 4.2 `Handler` — a handler, not a server
+### 4.2 The server composition is deliberately NOT here
 
-```
-telemetry.Server  ->  httpserver.AccessLog  ->  h
-```
+`kit` ships no server-side helper, and does not import `httpserver`.
 
-`kit` returns the wrapped handler and leaves `httpserver.New` to the caller.
-`httpserver.Options` already defaults its own timeouts, so `kit` would add
-nothing but a pass-through, and wrapping the server type would put `kit` in the
-lifecycle path it has no business being in.
+The asymmetry is the point. A service creates **one** handler chain, in one
+visible place, usually in the same file as the rest of its wiring. It creates a
+client **per upstream**, and each one is a fresh opportunity to compose wrongly
+— which is where a helper earns its keep. Shipping a one-line wrapper for the
+singular case would add a sibling import for very little.
 
-`HandlerOptions.Logger` nil means **no access log** — `telemetry.Server` still
-wraps. That is a legitimate configuration (a service logging requests its own
-way) and is not an error.
+**The residual risk, stated rather than elided.** The server inversion is the
+most damaging of the three in §1: composing `telemetry.Server` inside
+`httpserver.AccessLog` costs the access line its route *as well as* its
+`trace_id`, because `Server` rebinds the request and `ServeMux` records the
+matched pattern on the rebound instance. Nothing in `kit` prevents it. It is
+guarded today only by `examples/orders`' `TestAcceptanceLogLineCarriesRouteAndStatus`,
+which protects the exemplar and no one else's service.
+
+`telemetry.Server`'s doc comment carries the ordering requirement and the
+mechanism. That is the whole mitigation, and it is a weaker one than a tested
+function — a deliberate trade, revisitable if the failure shows up in practice.
 
 ### 4.3 `NewLogger` — the reason this module is not client-only
 
@@ -166,25 +168,23 @@ nothing else.
    call.
 4. `o.HTTP.Middleware` is chained innermost and actually runs — asserted by a
    middleware that observes it ran once per attempt, not once per call.
-5. `Handler` composes `telemetry.Server` outside `AccessLog`. A test fails if
-   inverted, asserting the access line carries **both** `trace_id` and route.
-6. `HandlerOptions.Logger == nil` omits the access log and still traces.
-7. `NewLogger` produces a logger whose records carry `trace_id` inside a span
+5. `NewLogger` produces a logger whose records carry `trace_id` inside a span
    and **no** `trace_id` outside one.
-8. `LoggerOptions.Baggage` forwards only allowlisted members.
-9. `ClientOptions{}`, `HandlerOptions{}`, `LoggerOptions{}` — all zero values —
-   produce a working stack, asserted end to end with **no OTel SDK**.
-10. Each embedded option field reaches its destination, one distinct observable
+6. `LoggerOptions.Baggage` forwards only allowlisted members.
+7. `ClientOptions{}` and `LoggerOptions{}` — both zero values — produce a
+   working stack, asserted end to end with **no OTel SDK**.
+8. `kit` does **not** import `httpserver`, asserted structurally (§4.2).
+9. Each embedded option field reaches its destination, one distinct observable
     value per field (the struct-literal mutation blind spot, carried from R2).
-11. 100% statement coverage; mutation at or above 0.85, survivors killed or
+10. 100% statement coverage; mutation at or above 0.85, survivors killed or
     justified with **executed** evidence.
-12. `conventions.md` §11 amended in place to name `kit` as the second
+11. `conventions.md` §11 amended in place to name `kit` as the second
     exception, with the sibling-import distinction stated.
-13. `./scripts/ci.sh` exits 0 across all 11 modules.
+12. `./scripts/ci.sh` exits 0 across all 11 modules.
 
 ## 7. Testing notes
 
-The three ordering criteria (3, 5, and the extractor half of 7) are this
+The two ordering criteria (3, and the extractor half of 5) are this
 milestone's entire reason to exist, and each must be proven by **inverting the
 composition and watching a named test fail**. R5 found four tests that could not
 fail, every one by running a mutation rather than reading; a composition module
@@ -197,6 +197,7 @@ so a changed assertion means `kit` is not equivalent to what it replaces.
 
 ## 8. Out of scope
 
-A `kit` server constructor wrapping `httpserver.New` (§4.2). Non-HTTP
+**Any server-side helper** — not a constructor wrapping `httpserver.New`, and
+not a handler wrapper either (§4.2). Non-HTTP
 composition. Any default not owned by a sibling module (§5). Circuit breaking,
 still deferred since R2.
