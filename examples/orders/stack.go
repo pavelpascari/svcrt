@@ -10,6 +10,7 @@ import (
 	"github.com/pavelpascari/svcrt/httpserver"
 	"github.com/pavelpascari/svcrt/lifecycle"
 	"github.com/pavelpascari/svcrt/resilience"
+	"github.com/pavelpascari/svcrt/telemetry"
 )
 
 // appStack is the health/lifecycle/api/admin composition. It is built by
@@ -112,6 +113,10 @@ func buildStack(cfg appStackConfig) *appStack {
 				MaxAttempts: 3,
 				Backoff:     resilience.Constant(10 * time.Millisecond),
 			}),
+			// telemetry.Client goes INSIDE Retry, so one span is recorded per
+			// attempt -- a retried call then shows the attempts that failed.
+			// Outside, three attempts would collapse into one span.
+			telemetry.Client(telemetry.Options{}),
 		),
 	}))
 	lc.Add("pricing-client",

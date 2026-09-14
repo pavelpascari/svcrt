@@ -8,6 +8,7 @@ import (
 
 	"github.com/pavelpascari/svcrt/contract"
 	"github.com/pavelpascari/svcrt/httpserver"
+	"github.com/pavelpascari/svcrt/telemetry"
 )
 
 // statusFor maps an error code to an HTTP status.
@@ -97,5 +98,17 @@ func newServer(svc *Service, log *slog.Logger) http.Handler {
 		writeJSON(w, http.StatusOK, order)
 	})
 
-	return httpserver.AccessLog(log)(mux)
+	// telemetry.Server goes OUTSIDE AccessLog: the access-log line is emitted
+	// by the handler AccessLog wraps, so the span must already be in context
+	// by the time that line is written. Inverting this order was verified (by
+	// hand, not committed) to break TestAcceptanceLogLineCarriesRouteAndStatus
+	// below -- telemetry.Server rebinds the request via r.WithContext, so
+	// AccessLog's closure over the pre-rebind *http.Request never observes
+	// the route ServeMux sets on r.Pattern once telemetry.Server sits
+	// outside it. See also TestAccessLogLosesTheTraceIDWhenTelemetryIsInnermost
+	// in telemetry_test.go, which pins the trace-id side of the same ordering.
+	return httpserver.Chain(
+		telemetry.Server(telemetry.Options{}),
+		httpserver.AccessLog(log),
+	)(mux)
 }

@@ -10,4 +10,5 @@ require (
 	github.com/pavelpascari/svcrt/lifecycle v0.0.0
 	github.com/pavelpascari/svcrt/logging v0.0.0
 	github.com/pavelpascari/svcrt/resilience v0.0.0
+	github.com/pavelpascari/svcrt/telemetry v0.0.0
 )
