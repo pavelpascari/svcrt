@@ -128,3 +128,35 @@ func TestDurationHistogramSurvivesAMeterThatErrors(t *testing.T) {
 	// The real assertion: this must not panic.
 	h.Record(context.Background(), 1.0, metric.WithAttributes())
 }
+
+// TestDurationHistogramUsesTheProvidedMeterOnSuccess is the success-path
+// counterpart to the error-path test above. Every other test in this package
+// only ever calls durationHistogram with a meter that errors, so a mutant
+// that deletes the "if err != nil" guard and unconditionally substitutes the
+// no-op instrument -- ignoring m entirely -- passes the whole suite at 100%
+// statement coverage: the true branch's own statement is exercised, and
+// "return h" is shared with the false branch, which has no statement of its
+// own for coverage to miss.
+//
+// Asserting on the returned instrument's dynamic type would not kill that
+// mutant either -- it would just pin an implementation detail. The kill has
+// to be behavioural: record through the returned histogram and check the
+// measurement reached the meter that was actually passed in.
+func TestDurationHistogramUsesTheProvidedMeterOnSuccess(t *testing.T) {
+	mp := &recordingMeterProvider{}
+	m := mp.Meter(instrumentationName)
+
+	h := durationHistogram(m, "test.histogram", "desc")
+	h.Record(context.Background(), 2.5, metric.WithAttributes())
+
+	got := mp.records()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 measurement recorded on the provided meter, got %d", len(got))
+	}
+	if got[0].name != "test.histogram" {
+		t.Errorf("instrument name = %q, want %q", got[0].name, "test.histogram")
+	}
+	if got[0].value != 2.5 {
+		t.Errorf("recorded value = %v, want 2.5", got[0].value)
+	}
+}
