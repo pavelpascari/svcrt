@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/pavelpascari/svcrt/contract"
+	"github.com/pavelpascari/svcrt/httpserver"
 	"github.com/pavelpascari/svcrt/logging"
 )
 
@@ -183,11 +184,11 @@ func TestAcceptanceLogLineCarriesRouteAndStatus(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(logs())), &line); err != nil {
 		t.Fatalf("decode log %q: %v", logs(), err)
 	}
-	if line[logging.KeyRoute] != "GET /orders/{id}" {
-		t.Errorf("%s = %v, want the route pattern", logging.KeyRoute, line[logging.KeyRoute])
+	if line[httpserver.KeyRoute] != "GET /orders/{id}" {
+		t.Errorf("%s = %v, want the route pattern", httpserver.KeyRoute, line[httpserver.KeyRoute])
 	}
-	if line[logging.KeyStatus] != float64(200) {
-		t.Errorf("%s = %v, want 200", logging.KeyStatus, line[logging.KeyStatus])
+	if line[httpserver.KeyStatus] != float64(200) {
+		t.Errorf("%s = %v, want 200", httpserver.KeyStatus, line[httpserver.KeyStatus])
 	}
 }
 
@@ -339,7 +340,7 @@ func TestIDLengthBoundaryAtExactlyMax(t *testing.T) {
 	}
 }
 
-// logging.KeyCode had no producer anywhere in the repo. A well-known key
+// contract.KeyCode had no producer anywhere in the repo. A well-known key
 // nobody writes is a convention nobody follows, so writeError emits it on
 // both of its branches -- which is also what lets an operator join a
 // server-side line to the envelope a client received.
@@ -364,8 +365,8 @@ func TestWriteErrorLogsTheErrorCodeUnderTheWellKnownKey(t *testing.T) {
 		if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &line); err != nil {
 			t.Fatalf("%s: decode log %q: %v", tc.name, buf.String(), err)
 		}
-		if line[logging.KeyCode] != tc.wantCode {
-			t.Errorf("%s: %s = %v, want %q", tc.name, logging.KeyCode, line[logging.KeyCode], tc.wantCode)
+		if line[contract.KeyCode] != tc.wantCode {
+			t.Errorf("%s: %s = %v, want %q", tc.name, contract.KeyCode, line[contract.KeyCode], tc.wantCode)
 		}
 	}
 }

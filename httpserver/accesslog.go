@@ -1,9 +1,26 @@
-package logging
+package httpserver
 
 import (
 	"log/slog"
 	"net/http"
 	"time"
+)
+
+// Well-known attribute keys for the access log.
+//
+// Log output is consumed by a node agent with a schema contract, so these
+// names are part of the interface rather than free-form text (12-factor XI,
+// amended).
+//
+// They live here rather than in a logging package because AccessLog is what
+// emits them: method and route come from the request, status and duration
+// from serving it. A module that does not produce an attribute should not be
+// naming it.
+const (
+	KeyMethod = "method"
+	KeyRoute  = "route"
+	KeyStatus = "status"
+	KeyDurMS  = "duration_ms"
 )
 
 // statusWriter records the response status without hiding any of the optional
@@ -37,7 +54,7 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-// Middleware logs one line per request at completion.
+// AccessLog logs one line per request at completion.
 //
 // The route is taken from the matched ServeMux pattern, not the request path,
 // so the key holds "GET /orders/{id}" rather than a distinct value per order
@@ -45,7 +62,7 @@ func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 // key is omitted entirely rather than falling back to the raw path, which
 // would reintroduce unbounded cardinality on exactly the URLs an unauthorized
 // scanner can generate at will.
-func Middleware(l *slog.Logger) func(http.Handler) http.Handler {
+func AccessLog(l *slog.Logger) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()

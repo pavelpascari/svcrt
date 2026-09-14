@@ -10,6 +10,20 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # lib.sh also asserts every COUNT_MODULES name is a module that exists.
 . scripts/lib.sh
 
+# Global Constraints, every milestone spec: "gofmt -l . silent". Checked here,
+# first, because a formatting break is cheap to catch before the test matrix
+# runs. `gofmt -l` exits 0 whether or not it prints filenames -- a bare
+# `gofmt -l . || fail` would never fire -- so the condition tests the output
+# for non-emptiness, not the exit status. Assigned inside `if !`, same as the
+# `go list` check below: a bare `unformatted=$(...)` under set -e would abort
+# silently if gofmt itself failed to run (missing binary, unparseable file),
+# and the gate would report nothing rather than reporting that it never ran.
+if ! unformatted=$(gofmt -l .); then
+  fail "gofmt -l failed to run"
+fi
+[ -z "$unformatted" ] || fail "gofmt -l found unformatted files:
+$unformatted"
+
 for m in "${MODULES[@]}"; do
   echo "== $m =="
 

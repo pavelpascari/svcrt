@@ -11,9 +11,8 @@ import "net/http"
 //
 // This is the client-side mirror of httpserver.Middleware. Note the deliberate
 // spelling differences across this project, recorded in docs/conventions.md:
-// contract.Middleware is a generic call-level type, logging.Middleware is a
-// constructor returning a transport-level one, httpserver.Middleware wraps an
-// http.Handler, and this wraps an http.RoundTripper.
+// contract.Middleware is a generic call-level type, httpserver.Middleware
+// wraps an http.Handler, and this wraps an http.RoundTripper.
 //
 // Because http.RoundTripper is stdlib vocabulary, a module that ships
 // middleware of this shape needs no dependency on httpclient at all.
