@@ -26,6 +26,39 @@ for f in */go.mod; do
 done
 [ ${#MODULES[@]} -gt 0 ] || svcrt_fail "no library modules found (expected */go.mod)"
 
+# A module that legitimately keeps real dependencies, as "<module>=<why>".
+# Zero requires is the default (spec §8.2) because a library that costs
+# nothing extra to pull in is the whole point of shipping it separately -- an
+# entry here is a documented, deliberate exception to that default, not an
+# oversight. Shaped as a sentence rather than a bare name for the same reason
+# as COUNT_EXEMPT below: once a list is just names, "someone forgot" and
+# "someone decided" are indistinguishable.
+DEP_EXEMPT=(
+  "telemetry=depends on the OpenTelemetry API -- otel, otel/trace, otel/metric; a tracing library that refused to depend on a tracing API would reimplement W3C tracecontext, which is not independence but a second, worse implementation of a standard"
+)
+
+# Both directions of DEP_EXEMPT are asserted against disk, for the same
+# reason COUNT_MODULES/COUNT_EXEMPT are asserted in both directions below.
+#
+# FORWARD (here) -- every entry must name a module that exists on disk. A
+# rename or a typo leaves an entry exempting nothing while ci.sh's zero-deps
+# loop believes it is skipped, and the module would fail loudly there instead
+# of here where the mistake actually is.
+#
+# INVERSE -- an exempted module whose dependencies have since gone to zero.
+# That needs `go list -m all`, which is the expensive-enough-to-not-duplicate
+# call ci.sh's own loop already makes per module, so the inverse half lives
+# there (via dep_exempt_reason below) rather than here.
+for e in ${DEP_EXEMPT[@]+"${DEP_EXEMPT[@]}"}; do
+  key=${e%%=*}
+  found=false
+  for m in "${MODULES[@]}"; do
+    if [ "$m" = "$key" ]; then found=true; fi
+  done
+  $found || svcrt_fail "DEP_EXEMPT names '$key', which is not a module on disk. That exemption is doing nothing. Fix the name or drop it."
+  [ "$e" != "$key" ] || svcrt_fail "DEP_EXEMPT entry '$e' carries no reason. Write it as '$key=<why this module needs real dependencies>'."
+done
+
 # The exemplars, derived the same way and for the same reason: a second
 # exemplar added later must not be silently ungated.
 EXEMPLARS=()
@@ -121,4 +154,18 @@ count_for() {
     if [ "$c" = "$1" ]; then printf '10'; return; fi
   done
   printf '1'
+}
+
+# dep_exempt_reason prints the DEP_EXEMPT reason for module $1 and succeeds,
+# or fails (prints nothing) if $1 is not exempt. This is the inverse half of
+# the DEP_EXEMPT forward check above: ci.sh's zero-deps loop calls this per
+# module, and when it succeeds must additionally confirm 'go list -m all'
+# still returns more than one line -- an exempted module that has quietly
+# gone dependency-free is a stale exemption, which is a lie in the gate.
+dep_exempt_reason() {
+  local e
+  for e in ${DEP_EXEMPT[@]+"${DEP_EXEMPT[@]}"}; do
+    case "$e" in "$1="*) printf '%s' "${e#*=}"; return 0 ;; esac
+  done
+  return 1
 }

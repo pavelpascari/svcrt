@@ -32,14 +32,22 @@ for m in "${MODULES[@]}"; do
   (cd "$m" && GOWORK=off go vet ./...) || fail "$m: go vet"
   (cd "$m" && GOWORK=off go test -race -count=$(count_for "$m") ./...) || fail "$m: go test"
 
-  # Spec §8.2: zero requires. Exactly one line -- the module itself.
+  # Spec §8.2: zero requires. Exactly one line -- the module itself -- unless
+  # the module is named in DEP_EXEMPT (lib.sh), in which case the assertion
+  # flips: it must have MORE than one line, because an exemption for a module
+  # that has quietly gone dependency-free is a stale exemption, and a stale
+  # exemption is a lie in the gate.
   # Assigned inside `if !` so a go list failure reports through fail() with
   # its label; a bare `n=$(...)` under set -e aborts before we get here and
   # the operator is left guessing which module and which check broke.
   if ! n=$(cd "$m" && GOWORK=off go list -m all | wc -l | tr -d ' '); then
     fail "$m: go list -m all"
   fi
-  [ "$n" -eq 1 ] || fail "$m: has module dependencies ($n lines from 'go list -m all')"
+  if reason=$(dep_exempt_reason "$m"); then
+    [ "$n" -gt 1 ] || fail "$m: DEP_EXEMPT says '$reason', but 'go list -m all' now returns $n line(s) -- $m is dependency-free again. Remove the now-false exemption from DEP_EXEMPT in scripts/lib.sh."
+  else
+    [ "$n" -eq 1 ] || fail "$m: has module dependencies ($n lines from 'go list -m all')"
+  fi
 done
 
 # Spec §4.1: contract imports "context" and nothing else.
