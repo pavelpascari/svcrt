@@ -6,11 +6,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/pavelpascari/svcrt/httpclient"
 	"github.com/pavelpascari/svcrt/httpserver"
+	"github.com/pavelpascari/svcrt/kit"
 	"github.com/pavelpascari/svcrt/lifecycle"
 	"github.com/pavelpascari/svcrt/resilience"
-	"github.com/pavelpascari/svcrt/telemetry"
 )
 
 // appStack is the health/lifecycle/api/admin composition. It is built by
@@ -104,20 +103,11 @@ func buildStack(cfg appStackConfig) *appStack {
 		func(ctx context.Context) error { trace("stop:admin"); return admin.Shutdown(ctx) },
 		lifecycle.After(store))
 
-	pricing := NewPricingClient(cfg.PricingURL, httpclient.New(httpclient.Options{
-		Middleware: httpclient.Chain(
-			// resilience returns the bare func(http.RoundTripper) http.RoundTripper,
-			// so it is assignable to httpclient.Middleware with neither module
-			// importing the other. A named type on both sides would not compile.
-			resilience.Retry(resilience.Policy{
-				MaxAttempts: 3,
-				Backoff:     resilience.Constant(10 * time.Millisecond),
-			}),
-			// telemetry.Client goes INSIDE Retry, so one span is recorded per
-			// attempt -- a retried call then shows the attempts that failed.
-			// Outside, three attempts would collapse into one span.
-			telemetry.Client(telemetry.Options{}),
-		),
+	pricing := NewPricingClient(cfg.PricingURL, kit.NewClient(kit.ClientOptions{
+		Retry: resilience.Policy{
+			MaxAttempts: 3,
+			Backoff:     resilience.Constant(10 * time.Millisecond),
+		},
 	}))
 	lc.Add("pricing-client",
 		func(context.Context) error { return nil },
