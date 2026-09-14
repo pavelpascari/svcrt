@@ -164,6 +164,36 @@ func (s *recordedSpan) attr(key string) (attribute.Value, bool) {
 	return attribute.Value{}, false
 }
 
+// countingMeterProvider counts instrument constructions so a test can prove
+// they happen at middleware construction, not per request.
+type countingMeterProvider struct {
+	membedded.MeterProvider
+	mu sync.Mutex
+	n  int
+}
+
+func (p *countingMeterProvider) Meter(string, ...metric.MeterOption) metric.Meter {
+	return &countingMeter{p: p}
+}
+
+func (p *countingMeterProvider) histograms() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.n
+}
+
+type countingMeter struct {
+	mnoop.Meter
+	p *countingMeterProvider
+}
+
+func (m *countingMeter) Float64Histogram(name string, opts ...metric.Float64HistogramOption) (metric.Float64Histogram, error) {
+	m.p.mu.Lock()
+	m.p.n++
+	m.p.mu.Unlock()
+	return mnoop.Meter{}.Float64Histogram(name, opts...)
+}
+
 // headerPropagator is a propagator that writes one distinctive header, so a
 // test can prove Options.Propagator was used rather than the W3C default.
 type headerPropagator struct{ header string }

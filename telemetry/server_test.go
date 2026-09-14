@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -190,5 +191,105 @@ func TestServerPreservesFlusherThroughResponseController(t *testing.T) {
 
 	if flushErr != nil {
 		t.Errorf("Flush through the wrapper failed: %v", flushErr)
+	}
+}
+
+func attrOf(m measurement, key string) (attribute.Value, bool) {
+	for _, kv := range m.attrs.ToSlice() {
+		if string(kv.Key) == key {
+			return kv.Value, true
+		}
+	}
+	return attribute.Value{}, false
+}
+
+func TestServerRecordsRequestDuration(t *testing.T) {
+	mp := &recordingMeterProvider{}
+	req := httptest.NewRequest(http.MethodGet, "/orders/123", nil)
+
+	serve(t, &recordingTracerProvider{}, mp, "GET /orders/{id}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	}, req)
+
+	got := mp.records()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 measurement, got %d", len(got))
+	}
+	m := got[0]
+	if m.name != "http.server.request.duration" {
+		t.Errorf("instrument = %q", m.name)
+	}
+	// Seconds, per semconv -- NOT the milliseconds httpserver.AccessLog logs.
+	// A differently-scaled http.server.request.duration is silently wrong on
+	// every shared dashboard.
+	if m.value <= 0 || m.value > 5 {
+		t.Errorf("duration = %v s, want a small positive number of seconds", m.value)
+	}
+	for key, want := range map[string]string{
+		"http.request.method": http.MethodGet,
+		"http.route":          "GET /orders/{id}",
+	} {
+		v, ok := attrOf(m, key)
+		if !ok || v.AsString() != want {
+			t.Errorf("attr %s = %v (present=%v), want %q", key, v, ok, want)
+		}
+	}
+	if v, ok := attrOf(m, "http.response.status_code"); !ok || v.AsInt64() != http.StatusCreated {
+		t.Errorf("attr http.response.status_code = %v (present=%v)", v, ok)
+	}
+}
+
+// TestServerMetricOmitsRouteWhenUnmatched: the metric attribute set is where
+// cardinality actually costs money. A 404 must not create a time series per
+// scanned URL.
+func TestServerMetricOmitsRouteWhenUnmatched(t *testing.T) {
+	mp := &recordingMeterProvider{}
+	req := httptest.NewRequest(http.MethodGet, "/no/such/thing/9f3a", nil)
+
+	serve(t, &recordingTracerProvider{}, mp, "GET /orders/{id}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}, req)
+
+	m := mp.records()[0]
+	if v, ok := attrOf(m, "http.route"); ok {
+		t.Fatalf("http.route = %v on an unmatched request; expected it to be omitted", v)
+	}
+}
+
+// TestServerRecordsDurationWhenTheHandlerPanics: a panicking request is
+// exactly the one you want in the latency histogram.
+func TestServerRecordsDurationWhenTheHandlerPanics(t *testing.T) {
+	mp := &recordingMeterProvider{}
+	req := httptest.NewRequest(http.MethodGet, "/boom", nil)
+
+	func() {
+		defer func() { recover() }()
+		serve(t, &recordingTracerProvider{}, mp, "/boom", func(w http.ResponseWriter, r *http.Request) {
+			panic("handler exploded")
+		}, req)
+	}()
+
+	got := mp.records()
+	if len(got) != 1 {
+		t.Fatalf("expected a measurement for the panicking request, got %d", len(got))
+	}
+	// No response was sent, so claiming a status would be an invention.
+	if v, ok := attrOf(got[0], "http.response.status_code"); ok {
+		t.Errorf("status_code = %v recorded for a request that sent no response", v)
+	}
+}
+
+// TestServerInstrumentIsBuiltOncePerMiddleware, not once per request: an
+// instrument created inside the handler would be a per-request allocation and
+// a per-request meter call.
+func TestServerInstrumentIsBuiltOncePerMiddleware(t *testing.T) {
+	mp := &countingMeterProvider{}
+	h := Server(Options{MeterProvider: mp, TracerProvider: &recordingTracerProvider{}})(http.NewServeMux())
+
+	for range 3 {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/x", nil))
+	}
+	if n := mp.histograms(); n != 1 {
+		t.Fatalf("built %d histograms for 3 requests, want 1", n)
 	}
 }

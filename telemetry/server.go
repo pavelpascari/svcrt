@@ -2,8 +2,11 @@ package telemetry
 
 import (
 	"net/http"
+	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	semconv "go.opentelemetry.io/otel/semconv/v1.30.0"
 	"go.opentelemetry.io/otel/trace"
@@ -58,6 +61,10 @@ func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 func Server(o Options) func(http.Handler) http.Handler {
 	prop := o.propagator()
 	tracer := o.tracer()
+	hist := durationHistogram(o.meter(),
+		"http.server.request.duration",
+		"Duration of inbound HTTP requests.",
+	)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -72,36 +79,47 @@ func Server(o Options) func(http.Handler) http.Handler {
 			)
 			defer span.End()
 
+			start := time.Now()
 			sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 			r = r.WithContext(ctx)
 
-			// Deferred so a panicking handler still produces a finished span.
-			// The request that crashed is the one most worth having in a
-			// trace, and an undeferred call skips exactly that case.
+			// Deferred so a panicking handler still produces a finished span
+			// and a recorded duration. The request that crashed is the one
+			// most worth having in a trace and in the latency histogram, and
+			// an undeferred call skips exactly that case.
 			//
 			// The panic is deliberately NOT recovered: whether it becomes a
 			// 500 or takes the process down is the service author's decision.
 			// This only makes sure it is not also invisible.
 			defer func() {
+				attrs := make([]attribute.KeyValue, 0, 3)
+				attrs = append(attrs, semconv.HTTPRequestMethodKey.String(r.Method))
+
 				// r.Pattern is the verbatim registered ServeMux pattern, which
 				// already carries the method when registered as "GET /x" --
 				// matching svcrt/httpserver.AccessLog's KeyRoute convention.
 				// Prepending r.Method here would double it up.
 				if r.Pattern != "" {
 					span.SetName(r.Pattern)
-					span.SetAttributes(semconv.HTTPRoute(r.Pattern))
+					attrs = append(attrs, semconv.HTTPRoute(r.Pattern))
 				}
 				// written is false when the handler panicked before writing:
 				// net/http sends no response at all, so the optimistic 200
 				// default is not what happened. Omit rather than invent.
 				if sw.written {
-					span.SetAttributes(semconv.HTTPResponseStatusCode(sw.status))
+					attrs = append(attrs, semconv.HTTPResponseStatusCode(sw.status))
 					// 4xx is the caller's fault and leaves the span Unset;
 					// only 5xx marks this server's span as failed.
 					if sw.status >= http.StatusInternalServerError {
 						span.SetStatus(codes.Error, http.StatusText(sw.status))
 					}
 				}
+
+				// attrs[1:] skips the method, which the span already carries
+				// from WithAttributes at Start; the metric needs it in its
+				// own attribute set.
+				span.SetAttributes(attrs[1:]...)
+				hist.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(attrs...))
 			}()
 
 			next.ServeHTTP(sw, r)
