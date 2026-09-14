@@ -78,6 +78,45 @@ func TestEveryOptionLandsOnItsOwnDestination(t *testing.T) {
 	}
 }
 
+// TestZeroOptionsTracerReachesGlobal pins that the nil-TracerProvider branch
+// of tracer() resolves to the process-wide global TracerProvider rather than
+// returning nil or panicking. It deliberately does NOT call
+// otel.SetTracerProvider: no test may mutate process-wide OTel state, and the
+// unconfigured global is already a usable (no-op) implementation, which is
+// exactly what this resolver must hand back without choking on it.
+func TestZeroOptionsTracerReachesGlobal(t *testing.T) {
+	tr := Options{}.tracer()
+	if tr == nil {
+		t.Fatal("Options{}.tracer() returned nil")
+	}
+
+	_, span := tr.Start(context.Background(), "op")
+	if span == nil {
+		t.Fatal("global tracer's Start returned a nil span")
+	}
+}
+
+// TestZeroOptionsMeterReachesGlobal pins the same contract for meter(): the
+// nil-MeterProvider branch must resolve to the process-wide global
+// MeterProvider, not panic or return something unusable. As above, no
+// otel.SetMeterProvider call -- the unconfigured global default is what's
+// under test.
+func TestZeroOptionsMeterReachesGlobal(t *testing.T) {
+	m := Options{}.meter()
+	if m == nil {
+		t.Fatal("Options{}.meter() returned nil")
+	}
+
+	h, err := m.Float64Histogram("x")
+	if err != nil {
+		t.Fatalf("global meter Float64Histogram error: %v", err)
+	}
+	if h == nil {
+		t.Fatal("global meter returned a nil histogram")
+	}
+	h.Record(context.Background(), 1.0)
+}
+
 // TestDurationHistogramSurvivesAMeterThatErrors is the guard for spec S3.3:
 // metric.Meter documents NO guarantee that the returned instrument is usable
 // when the error is non-nil, so a nil instrument must not reach Record.
