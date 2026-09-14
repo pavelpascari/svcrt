@@ -22,7 +22,11 @@ is the example the rule is built on. `httpclient` also scores 1.000 with no
 survivors and *does* have an entry, under the exception above.
 `examples/orders` scored 1.000 through R2 but no longer does, once
 `resilience.Retry` gave it a retry-policy literal to mutate in R3; see its
-own section below.
+own section below. `kit` scores 1.000 on a population of **two** mutants and
+has the most emphatic entry of the lot under the same exception: it is a
+module made entirely of argument order and struct-literal copies, so the
+score is close to vacuous and the evidence is a table of executed inversions
+instead.
 
 **1.000 is not "everything is covered."** go-mutesting does not mutate
 struct-literal field assignments, so a whole class of wiring bug is invisible
@@ -1275,3 +1279,48 @@ via `w.written = true` -- is covered by
 `TestServerIgnoresWriteHeaderAfterImplicitWrite` and
 `TestServerDefaultsToStatus200OnImplicitWrite`, and both fail if that companion
 assignment is removed.
+
+## `kit` Module
+
+**Mutation Score: 1.000 (2/2), no survivors** — and the entry exists under the
+preamble's exception, because this is the module where a perfect score means
+the least of any in the repo. Two mutants is the whole population, both in
+`client.go`, both killed. `logger.go` generates **zero** mutants: it is one
+`return logging.New(w, o.Logging, telemetry.LogExtractor(o.Baggage...))` with
+no operator, no branch and no literal for any mutator to touch, so
+go-mutesting has nothing to say about the function whose omission R5 proved is
+undetectable. `kit.go` is a package comment.
+
+That is not a gap in the run; it is what `kit` *is*. Every behaviour this
+module has is **argument order in a slice literal** and **struct-literal field
+copies** — the two things the preamble already says go-mutesting cannot see.
+Inverting `resilience.Retry` and `telemetry.Client` in `NewClient`'s `ms`
+literal compiles, runs, retries correctly, records spans, and is the exact
+silent failure `kit` was built to prevent. No mutator generates it.
+
+So the coverage that matters here was executed by hand, at R6, and every one
+of these was run rather than argued:
+
+| inversion | test that failed |
+|---|---|
+| `telemetry.Client` before `resilience.Retry` in `ms` | `TestNewClientRecordsOneSpanPerAttempt` (1 span, want 3) |
+| `o.HTTP.Middleware` prepended instead of appended | `TestCallerMiddlewareRunsOncePerAttempt` |
+| the `if o.HTTP.Middleware != nil` append deleted | `TestCallerMiddlewareRunsOncePerAttempt`, `TestCallerMiddlewareIsNotDiscarded`, `TestEveryClientOptionLandsOnItsOwnDestination` |
+| `opts := o.HTTP` → `opts := httpclient.Options{}` | `TestClientOptionsHTTPTimeoutReachesHttpclientNew` |
+| `telemetry.LogExtractor(...)` dropped from `logging.New` | `TestNewLoggerCorrelatesInsideASpan`, `TestNewLoggerForwardsAllowlistedBaggage` |
+| `LogExtractor(o.Baggage...)` → `LogExtractor()` | `TestNewLoggerForwardsAllowlistedBaggage` (missing `acme`) |
+| `o.Logging` → `logging.Options{}` | `TestEveryLoggerOptionLandsOnItsOwnDestination` |
+
+Each was applied to the source, the suite was run, and the **named** test
+failed for the stated reason; the source was restored and the suite confirmed
+green between each. That table, not the 1.000, is the evidence `kit` composes
+correctly.
+
+Two things follow for anyone changing this module. First, do not read a green
+`mutation.sh kit` as cover for a wiring edit — it cannot fail for one. Add the
+ordering test directly, the way `httpclient`'s
+`TestEveryOptionLandsOnItsOwnDestination` covers its `Options` copy. Second,
+if `kit` ever grows a branch or a literal of its own, that is a signal worth
+noticing rather than a routine change: `kit` declares no defaults, precisely so
+there is no defaulting logic here to get wrong (spec §5), and the mutant count
+rising above two means something now has a second source of truth.
