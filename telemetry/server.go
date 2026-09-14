@@ -56,9 +56,19 @@ func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 // bare path always starts with one). Checking for a "/" ahead of the first
 // space is therefore enough to tell the two cases apart without needing to
 // know which method string to look for.
+//
+// i <= 0, not i < 0. A pattern may begin WITH the space -- " /x" registers
+// on http.ServeMux without complaint, and net/http parses it exactly as the
+// method-less "/x" because the text before the first space is empty. The
+// sentence above ("either of which contains a '/' before any space could
+// occur") is false for precisely that input, which is the hole a mutation
+// survivor found at R5: with i == 0, pattern[:0] is "" and the Contains test
+// answers "no slash, so this is a method", naming the span " /x" and losing
+// the method a method-less route is supposed to gain. An empty method
+// component is an ABSENT method, so i == 0 returns false with i < 0.
 func routeHasMethodPrefix(pattern string) bool {
 	i := strings.IndexByte(pattern, ' ')
-	if i < 0 {
+	if i <= 0 {
 		return false
 	}
 	return !strings.Contains(pattern[:i], "/")

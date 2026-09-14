@@ -141,6 +141,11 @@ func TestClientMarksFourAndFiveHundredsAsErrors(t *testing.T) {
 		want   codes.Code
 	}{
 		{http.StatusOK, codes.Unset},
+		{http.StatusMultipleChoices, codes.Unset}, // 300: below the boundary
+		// 400 exactly. The check is `>= http.StatusBadRequest`, and `>`
+		// there leaves a plain Bad Request looking like a success -- the
+		// single commonest 4xx there is. Only this row can see it.
+		{http.StatusBadRequest, codes.Error},
 		{http.StatusNotFound, codes.Error},
 		{http.StatusInternalServerError, codes.Error},
 	} {
@@ -188,5 +193,62 @@ func TestClientRecordsOnTransportError(t *testing.T) {
 	}
 	if v, ok := attrOf(got[0], "http.response.status_code"); ok {
 		t.Errorf("status_code = %v recorded for a call that got no response", v)
+	}
+}
+
+// TestClientSpanCarriesTheResponseStatus covers the span's own status_code
+// attribute, as distinct from the histogram's.
+//
+// The two are set from separate statements over the same value, so a suite
+// that asserts only the metric (as TestClientRecordsSpanAndDuration did)
+// keeps passing with span.SetAttributes deleted outright: the trace loses the
+// status of every outbound call and no test notices. Asserting the whole key
+// sequence also pins that the method and server.address arrive once each,
+// from Start, and are not re-attached afterwards.
+func TestClientSpanCarriesTheResponseStatus(t *testing.T) {
+	tp := &recordingTracerProvider{}
+	var seen *http.Request
+	rt := Client(Options{TracerProvider: tp, MeterProvider: &recordingMeterProvider{}})(
+		okTransport(http.StatusTeapot, &seen))
+
+	if _, err := rt.RoundTrip(httptest.NewRequest(http.MethodGet, "http://pricing.internal/quote", nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	s := tp.recorded()[0]
+	if v, ok := s.attr("http.response.status_code"); !ok || v.AsInt64() != http.StatusTeapot {
+		t.Errorf("span http.response.status_code = %v (present=%v), want %d", v, ok, http.StatusTeapot)
+	}
+
+	var keys []string
+	for _, kv := range s.attrs {
+		keys = append(keys, string(kv.Key))
+	}
+	want := []string{"http.request.method", "server.address", "http.response.status_code"}
+	if len(keys) != len(want) {
+		t.Fatalf("span attribute keys = %v, want exactly %v", keys, want)
+	}
+	for i := range want {
+		if keys[i] != want[i] {
+			t.Fatalf("span attribute keys = %v, want exactly %v", keys, want)
+		}
+	}
+}
+
+// TestClientSpanCarriesNoStatusWhenTheTransportFailed is the negative half:
+// a call that never got a response must not carry a status attribute on the
+// span either, not just not in the histogram.
+func TestClientSpanCarriesNoStatusWhenTheTransportFailed(t *testing.T) {
+	tp := &recordingTracerProvider{}
+	rt := Client(Options{TracerProvider: tp, MeterProvider: &recordingMeterProvider{}})(
+		fnRoundTripper(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("dial tcp: connection refused")
+		}))
+
+	if _, err := rt.RoundTrip(httptest.NewRequest(http.MethodGet, "http://x/y", nil)); err == nil {
+		t.Fatal("expected the transport error back")
+	}
+	if v, ok := tp.recorded()[0].attr("http.response.status_code"); ok {
+		t.Errorf("span status_code = %v recorded for a call that got no response", v)
 	}
 }

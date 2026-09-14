@@ -336,3 +336,113 @@ func TestServerInstrumentIsBuiltOncePerMiddleware(t *testing.T) {
 		t.Fatalf("built %d histograms for 3 requests, want 1", n)
 	}
 }
+
+// TestRouteHasMethodPrefixTreatsAnEmptyMethodComponentAsAbsent pins both
+// sides of the i <= 0 boundary in routeHasMethodPrefix.
+//
+// The interesting row is " /x". It looks like nonsense and is not: it
+// registers on a real http.ServeMux (TestServerNamesTheSpanForALeadingSpace
+// PatternBelow drives one end to end), and net/http parses it as the
+// method-less "/x" because the text before the first space is empty. The
+// i == 0 case therefore has to answer "no method", and did not until R5 --
+// mutating `i < 0` to `i <= 0` or `i < 1` changed nothing any test could see.
+//
+// The "G /x" row is the other side of the same boundary, and it is why the
+// fix is `i <= 0` and not, say, `i <= 1`: "G" is a valid method token, so
+// i == 1 is a real method-ful pattern that must still answer true.
+func TestRouteHasMethodPrefixTreatsAnEmptyMethodComponentAsAbsent(t *testing.T) {
+	for _, tc := range []struct {
+		pattern string
+		want    bool
+	}{
+		{"/x", false},               // i == -1, no space at all
+		{" /x", false},              // i == 0, empty method component
+		{"  /x", false},             // i == 0, same, with more whitespace
+		{"G /x", true},              // i == 1, the shortest valid method
+		{"GET /x", true},            // the ordinary case
+		{"example.com/x", false},    // host, no method, no space
+		{"GET example.com/x", true}, // host WITH a method
+		{"/files/{p...} /x", false}, // a space inside the path, not a method
+	} {
+		if got := routeHasMethodPrefix(tc.pattern); got != tc.want {
+			t.Errorf("routeHasMethodPrefix(%q) = %v, want %v", tc.pattern, got, tc.want)
+		}
+	}
+}
+
+// TestServerNamesTheSpanForALeadingSpacePattern is the reachability half of
+// the test above: it proves " /x" is a pattern http.ServeMux accepts and
+// reports through r.Pattern, so the i == 0 case is a real input and not a
+// hypothetical one. The span name gains the method because the pattern
+// carries none.
+func TestServerNamesTheSpanForALeadingSpacePattern(t *testing.T) {
+	tp := &recordingTracerProvider{}
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+
+	serve(t, tp, &recordingMeterProvider{}, " /x", func(w http.ResponseWriter, r *http.Request) {
+		if r.Pattern != " /x" {
+			t.Fatalf("r.Pattern = %q, want the leading-space pattern back verbatim", r.Pattern)
+		}
+		w.WriteHeader(http.StatusOK)
+	}, req)
+
+	if got, want := tp.recorded()[0].name, http.MethodGet+"  /x"; got != want {
+		t.Errorf("span name = %q, want %q -- a method-less pattern gains the method", got, want)
+	}
+}
+
+// TestServerSpanCarriesEachAttributeExactlyOnce pins the attrs[1:] slice.
+//
+// The method is attached at Start (via WithAttributes) and must NOT be
+// attached a second time by the deferred SetAttributes -- attrs[0] is the
+// method, which is there for the metric's own attribute set, not the span's.
+// Asserting the whole key sequence rather than "is http.route present" is
+// what makes both directions visible: attrs[0:] duplicates the method,
+// attrs[2:] silently drops the route.
+func TestServerSpanCarriesEachAttributeExactlyOnce(t *testing.T) {
+	tp := &recordingTracerProvider{}
+	req := httptest.NewRequest(http.MethodGet, "/orders/123", nil)
+
+	serve(t, tp, &recordingMeterProvider{}, "GET /orders/{id}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}, req)
+
+	var keys []string
+	for _, kv := range tp.recorded()[0].attrs {
+		keys = append(keys, string(kv.Key))
+	}
+	want := []string{"http.request.method", "http.route", "http.response.status_code"}
+	if len(keys) != len(want) {
+		t.Fatalf("span attribute keys = %v, want exactly %v", keys, want)
+	}
+	for i := range want {
+		if keys[i] != want[i] {
+			t.Fatalf("span attribute keys = %v, want exactly %v", keys, want)
+		}
+	}
+	if v, ok := tp.recorded()[0].attr("http.route"); !ok || v.AsString() != "GET /orders/{id}" {
+		t.Errorf("http.route = %v (present=%v), want the pattern verbatim", v, ok)
+	}
+}
+
+// TestServerPassesTheStatusAndBodyThroughToTheClient is the assertion every
+// other test in this file was one layer too high to make: they all read the
+// recorded span and never looked at the response. statusWriter.WriteHeader
+// could stop forwarding to the wrapped ResponseWriter entirely -- the client
+// getting no status line at all -- with the whole suite still green, because
+// the wrapper's own bookkeeping (sw.status) is correct either way.
+func TestServerPassesTheStatusAndBodyThroughToTheClient(t *testing.T) {
+	rec := serve(t, &recordingTracerProvider{}, &recordingMeterProvider{}, "/x",
+		func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("upstream down"))
+		}, httptest.NewRequest(http.MethodGet, "/x", nil))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("response code = %d, want %d -- the wrapper swallowed WriteHeader",
+			rec.Code, http.StatusServiceUnavailable)
+	}
+	if got := rec.Body.String(); got != "upstream down" {
+		t.Errorf("response body = %q, want %q", got, "upstream down")
+	}
+}

@@ -1105,3 +1105,173 @@ as `logging.go.0` in `logging`'s section, not a new failure mode: the
 guard's *real* job -- recording that a write happened at all -- is covered
 and enforced by that test; only the redundant re-statement of the
 already-current default is equivalent.
+
+## `telemetry` Module
+
+**Mutation Score: 0.938776 (46/49), three surviving mutants -- `extractor.go.3`
+(checksum `1c2fd021f50b2ffad582a4351ec3b80f`), `extractor.go.5` (checksum
+`6b709c8910c39d512c86553d2d4d9e1e`) and `server.go.18` (checksum
+`7970747e325b669c562ee2307a0c8e1a`), all three verified equivalent below by
+running the comparison, not by reasoning about it.** Run
+`./scripts/mutation.sh telemetry` for the current score and mutant total.
+
+The first run of this module scored **0.795918 with ten survivors**, below the
+0.85 floor. Seven were killed (R5 Task 8's commit lists them one by one); the
+three below are equivalent. One of the seven is worth repeating here because
+it arrived disguised as an equivalence claim, and this file's own preamble
+rule -- an equivalence proof is a reason to look harder, not to stop -- is what
+caught it.
+
+### The prediction that was wrong: `routeHasMethodPrefix`'s `i < 0`
+
+```go
+func routeHasMethodPrefix(pattern string) bool {
+	i := strings.IndexByte(pattern, ' ')
+	if i < 0 {        // mutants: i <= 0, i < 1
+		return false
+	}
+	return !strings.Contains(pattern[:i], "/")
+}
+```
+
+The R5 plan predicted this family would be equivalent, on the function's own
+documented reasoning: "a method-less pattern begins directly with the host or
+the path, either of which contains a `/` before any space could occur."
+
+**That sentence is false, and `net/http` says so.** A pattern may begin WITH
+the space. `" /x"` registers on `http.ServeMux` without complaint, comes back
+through `r.Pattern` verbatim, and is parsed by `net/http` as the **method-less**
+`/x`, because `parsePattern` cuts at the first space and the text before it is
+empty. Executed, not assumed -- registering `" /x"`, `"  /x"` and `"G /x"` on a
+real mux and printing `rec.Code` and `r.Pattern` for each:
+
+```
+pattern " /x"    -> registered ok, code=200, r.Pattern=" /x",    IndexByte=0
+pattern "  /x"   -> registered ok, code=200, r.Pattern="  /x",   IndexByte=0
+pattern "G /x"   -> registered ok, code=200, r.Pattern="G /x",   IndexByte=1
+pattern "GET /x" -> registered ok, code=200, r.Pattern="GET /x", IndexByte=3
+```
+
+At `i == 0` the original took `pattern[:0]`, which is `""`, found no `/` in it,
+and concluded "this pattern has a method". It has none. So a method-less route
+kept the bare pattern as its span name -- `" /x"` -- losing the method that
+`routeHasMethodPrefix` exists to add back, which is the exact failure the
+function was written to prevent. The mutants answered **correctly** where the
+original answered wrongly.
+
+This is the R3 `Exponential(371ns, 743ns)` shape again, one milestone later and
+in a different module: an argument that holds for the inputs anyone thought to
+try (`"/x"`, `"GET /x"`), stated as if it held for all of them, with the
+counterexample one character away. The guard is now `i <= 0`, and
+`TestRouteHasMethodPrefixTreatsAnEmptyMethodComponentAsAbsent` pins both sides
+of that boundary -- `" /x"` (i == 0, must be false) and `"G /x"` (i == 1, the
+shortest valid method token, must be true), so neither `i < 0` nor `i <= 1`
+can come back. `TestServerNamesTheSpanForALeadingSpacePattern` is the
+reachability half: it drives `" /x"` through `Server` end to end, so the test
+above is pinned to an input a real mux produces rather than to a hypothetical.
+
+### `extractor.go.3` and `extractor.go.5`: `LogExtractor`'s `len(keys) > 0` guard
+
+```go
+if len(keys) > 0 {
+	b := baggage.FromContext(ctx)
+	for _, k := range keys {
+		if v := b.Member(k).Value(); v != "" {
+			attrs = append(attrs, slog.String(k, v))
+		}
+	}
+}
+```
+
+Mutants: `len(keys) >= 0` (`extractor.go.3`) and `len(keys) > -1`
+(`extractor.go.5`). Both make the condition unconditionally true.
+
+**Why the guard exists:** `LogExtractor()` with no allowlist is the common
+case -- every service that wants trace correlation and does not trust upstream
+baggage -- and it runs on **every log record**, not every request. The guard
+skips a context lookup on that path.
+
+**Why it is equivalent in behaviour:** with `keys` empty, the mutant additionally
+evaluates `baggage.FromContext(ctx)` and then ranges over an empty slice. That
+is zero iterations, so `attrs` is untouched, and `baggage.FromContext` is a
+`ctx.Value` read with no side effect -- it cannot append, cannot panic on a
+context that has no baggage, and returns a value the mutant then discards. With
+`keys` non-empty the two are the same code.
+
+**Executed, not argued.** The claim was checked by compiling the mutant
+alongside the original in the same package and comparing their outputs over the
+full cross product of four contexts (bare, span only, baggage only, span and
+baggage) and five key sets (`nil`, `{}`, `{"tenant_id"}`,
+`{"tenant_id","absent"}`, `{"absent"}`) -- 20 pairs, comparing the rendered
+attribute slice **and** `nil`-ness, since `LogExtractor`'s contract distinguishes
+a nil return from an empty one. All 20 identical, including the cases that
+matter most to the guard: `ctx=bare keys=[]` -> both `nil`, and
+`ctx=span and baggage keys=[]` -> both exactly
+`[trace_id=... span_id=...]` with no baggage leaking in.
+
+**The R5 plan predicted this one would be a genuine equivalent, and the
+prediction was right -- but it was right for the wrong reason, so it was still
+worth re-deriving.** The plan called the guard "an optimisation, not a
+behaviour change" and expected no test to distinguish it; Task 3 had separately
+reported that the guard short-circuits ahead of the baggage loop and that
+removing it would change what `TestLogExtractorWithNoAllowlistEmitsNoBaggage`
+observes. It does not: that test passes with either mutant applied (the whole
+suite does, which is why these two show as survivors at all). Two claims
+pointing in opposite directions is exactly the situation where running it is
+cheaper than choosing between them.
+
+No test kills these, and none should be written to: a test that asserted "the
+baggage lookup did not happen" would have to observe the absence of a side-effect
+free call, which means either an allocation count (flaky under `-race`, and
+`baggage.FromContext` on a baggage-free context allocates nothing to count) or a
+context that records `Value` calls -- a test of the implementation's shape rather
+than its behaviour, which is what conventions.md §4 calls a defect even when it
+raises the number.
+
+### `server.go.18`: `statusWriter.Write`'s redundant `w.status = http.StatusOK`
+
+```go
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if !w.written {
+		w.status = http.StatusOK
+		w.written = true
+	}
+	return w.ResponseWriter.Write(b)
+}
+```
+
+Mutant: replace the assignment with a no-op reference to both operands
+(`_, _ = w.status, http.StatusOK`), leaving `w.written = true` untouched.
+
+This is the **same mutant, on the same code, as `httpserver`'s
+`accesslog.go.7`** -- see that section above for the full argument. `telemetry`
+carries its own copy of `statusWriter` because it imports no svcrt module (the
+duplication is forced by the module boundary and is stated as such in
+`server.go`'s own comment), so the survivor is duplicated along with the type.
+
+The argument, restated for this copy: `status` is initialized to
+`http.StatusOK` at the one place `statusWriter` is constructed (`Server`'s
+`&statusWriter{ResponseWriter: w, status: http.StatusOK}`), and is written
+nowhere else except here and `WriteHeader`'s `w.status = code`, both guarded by
+the identical `if !w.written` and both setting `w.written = true` inside that
+guard. So reaching this line at all means nothing has written `status` since
+construction, and it still holds `http.StatusOK` -- the value being assigned.
+
+**Executed, not argued.** The original and the mutant were driven side by side
+through eight orderings of the writer's state machine -- implicit write; explicit
+`WriteHeader(500)`; write-then-header; header-then-write; two headers; two
+writes; header/write/header; and no call at all -- comparing `status`, `written`
+and the recorder's `Code` after each. All eight identical, e.g. seq 2
+(`Write` then `WriteHeader(500)`): both `status=200 written=true code=200`;
+seq 7 (no calls): both `status=200 written=false code=200`.
+
+A test *could* kill it by constructing `&statusWriter{ResponseWriter: rec}`
+directly, with a zero `status`, and asserting `Write` sets 200. That is
+deliberately not done, here or in `httpserver`: the zero-`status` writer is a
+state the production code never builds, so such a test would pin an invariant
+the type does not actually have and would pass whether or not the line does
+anything useful. The guard's real job -- recording that a write happened at all,
+via `w.written = true` -- is covered by
+`TestServerIgnoresWriteHeaderAfterImplicitWrite` and
+`TestServerDefaultsToStatus200OnImplicitWrite`, and both fail if that companion
+assignment is removed.
