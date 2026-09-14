@@ -220,8 +220,20 @@ every existing test gave the racing call a 20ms head start, so the race never
 fired under either gate. `-count=10` (with `-race`) is the check that would
 have caught it; a single green run says almost nothing about a module whose
 bugs are "hangs one run in fifty," not "returns the wrong value." `lifecycle`,
-`httpserver` and `resilience` run this way; the other library modules stay at
-`-count=1`.
+`httpserver`, `resilience`, `telemetry` and `kit` run this way; the other
+library modules stay at `-count=1`.
+
+Two of those five are there by judgement rather than by the heuristic below,
+and both would have been silently absent if the heuristic were the whole gate.
+`telemetry` (R5) matches none of the grepped constructs, yet its middleware
+closures capture one histogram and one tracer shared by every concurrent
+request. `kit` (R6) is three constructors and a slice literal and holds no
+shared mutable state of its own, but what it produces is a single
+`*http.Client` shared across every goroutine a service has, and it is the only
+place the composed chain runs as a whole — `resilience` and `telemetry` each
+get their ten runs unwired, so a race that exists only between them is visible
+nowhere else. The composition is the artifact, so the composition gets the
+gate.
 
 The list lives in `scripts/lib.sh` (`COUNT_MODULES`) and is **asserted against
 the modules on disk, in both directions**. It has to be hand-kept -- it is a
@@ -353,13 +365,29 @@ and a reviewer can accept one while questioning the other. Squashed together
 they read as a single confident step, which is the shape least likely to get
 the survivor argument actually checked.
 
-## 11. Core modules have zero dependencies; `telemetry` is the one exception
+## 11. Core modules have zero dependencies; there are two exceptions, and they are not the same kind
 
 `contract`, `config`, `logging`, `lifecycle`, `httpserver`, `httpclient` and
 `resilience` have **zero `require` directives**. A service can adopt any one of
 them without inheriting anything. This had never been written down — five
 milestones enforced it by habit, and `grep` finds no section stating it —
 which was survivable only while no module ever wanted an exception.
+
+There are now two exceptions, and reading them as a pair of equivalents would
+lose the thing that matters about the second:
+
+- **`telemetry` takes an external dependency** — the OpenTelemetry API. It
+  pulls something into a service from outside the repo.
+- **`kit` takes sibling dependencies**, and is the first module in svcrt ever
+  to do so. It pulls nothing in from outside that its siblings do not already
+  carry; what it introduces is an edge *between* svcrt modules, where there
+  had been none.
+
+The second is a bigger change than the first, because the property at risk is
+different. An external dependency is a cost you can read off a `go.mod`. A
+sibling edge is a direction: once `A` imports `B`, everything `B` ever requires
+is something `A`'s consumers get too, whether or not they wanted it — which is
+also why §2's unnamed-func-type rule exists.
 
 `telemetry` requires the OpenTelemetry API — `otel`, `otel/trace`,
 `otel/metric` — and is the only module that does. (`propagation`,
@@ -383,6 +411,34 @@ than stylistic here. If `telemetry` could import `logging`, `httpserver` and
 OpenTelemetry in behind it — not because `logging` wanted it, but because of
 which direction the import happened to point.
 
+### `kit`, and the sibling rule
+
+**No core module imports a sibling.** `kit` is the only module permitted to,
+and it imports four: `httpclient`, `resilience`, `telemetry`, `logging`.
+
+The argument has the same shape as `telemetry`'s. A module whose entire job
+requires the dependency takes the cost, and it is opt-in so nobody else pays.
+`kit` exists to encode the three middleware orderings R5 proved fail silently
+when inverted, and a composition module cannot compose without importing the
+things it composes. Nothing in svcrt imports `kit`; a service that ignores it
+inherits exactly what it did before, and one that adopts it deletes one import
+to leave.
+
+What that costs, stated plainly: a service on `kit` cannot upgrade
+`resilience` independently of `kit`. It upgrades `kit`, which pins the set.
+That is the actual trade, and it is why `kit` must stay thin enough to leave.
+
+`kit` deliberately does **not** import `httpserver`. A service builds one
+handler chain in one visible place; it builds a client per upstream, and it is
+the repeated case that earns a constructor. `ci.sh` asserts that omission
+structurally, because a deliberate omission nothing enforces is a comment.
+
+The sibling rule is newly *enforced*, not newly true. No core module has ever
+imported another — five milestones of habit, with nothing checking it, exactly
+as the zero-requires rule was before R5. R6 introduced the first deliberate
+violation, which is the moment to gate it rather than the moment to stop
+caring: a core module that starts requiring a sibling now fails CI by name.
+
 ### How it is enforced
 
 Not by this section. `scripts/ci.sh` asserts it per module, and it asserts
@@ -403,6 +459,41 @@ names a module that exists on disk and carries a reason; the inverse half
 needs `go list -m all` and so lives in the loop that already pays for that
 call, reached through `dep_exempt_reason`.
 
+The sibling rule is asserted in `scripts/lib.sh`, both directions, against the
+`go.mod` files on disk:
+
+- A module whose `go.mod` requires **any** `github.com/pavelpascari/svcrt/*`
+  must be named in `SIBLING_ALLOWED` — shaped `<module>=<why>`, same as the
+  lists above and for the same reason. Today that is `kit` and nothing else.
+- An entry in `SIBLING_ALLOWED` must name a module on disk, carry a reason,
+  and name a module that actually requires a sibling. A permission for a
+  module that requires none is the same lie a stale `DEP_EXEMPT` entry tells.
+
+One consequence is worth knowing, because it changes how CI runs. `kit`
+requires its siblings at `v0.0.0`, a version that resolves to nothing while
+this repo is untagged, so `kit` **cannot be built under `GOWORK=off`** — and
+`GOWORK=off` is how `ci.sh` proves every other module stands alone. That gate
+encodes an invariant `kit` exists to violate: `kit` is not useful without other
+svcrt modules present. So `ci.sh` derives the bucket from disk — a module
+requiring a sibling at `v0.0.0` runs **with** the workspace, exactly as the
+exemplars do and for the same reason — and it is self-healing: once the
+siblings are tagged and those requires name a real version, the module resolves
+standalone and drops back into the `GOWORK=off` loop with no exemption for
+anyone to remember to remove. The two buckets are asserted to partition
+`MODULES`, so a module cannot fall out of both and be silently untested.
+
+A workspace-bucket module skips the zero-requires assertion, because it has
+requires by construction. What replaces it: every non-sibling require must
+already be required by one of the siblings it composes. A composition module
+must not invent dependencies of its own, or adopting it would cost more than
+adopting the pieces. That check matches on module path and not version, so it
+does not see the version skew `GOWORK=off` exists to expose — that protection
+comes back on its own when the siblings are tagged.
+
+`scripts/release.sh` refuses to tag a module in the workspace bucket, and says
+why: a tag would publish a `go.mod` no consumer outside this workspace can
+resolve. Tag the siblings first.
+
 `scripts/release.sh` applies the same two-way check through the same
 `dep_exempt_reason`, for the reason §5 gives about `-count`: tagging is the
 point after which a version is permanent, so it is the last place the policy
@@ -412,9 +503,17 @@ to tag `telemetry` forever. Nothing caught that, because no module has been
 tagged yet, so the bug had no way to surface until the first person tried to
 cut a `telemetry` release. Both scripts now read one list.
 
-### Adding a second exception
+### Adding a third exception
 
-A design change, not a judgement call. It needs the same argument this one
-got, written down here, plus its `DEP_EXEMPT` entry. "It only pulls in one
-small library" is not that argument: the cost is paid by every service that
-adopts the module, and they are not in the room.
+A design change, not a judgement call. It needs the same argument the two
+above got, written down here, plus its `DEP_EXEMPT` or `SIBLING_ALLOWED`
+entry. "It only pulls in one small library" is not that argument: the cost is
+paid by every service that adopts the module, and they are not in the room.
+
+For a sibling edge specifically, the bar is higher, because the answer is
+almost always §2's: return the bare `func` type and let the caller assign it,
+so neither module imports the other. `telemetry.LogExtractor` and
+`resilience.Retry` both cross module boundaries that way with zero requires
+between them. A new sibling import needs to say why that is not available to
+it — `kit`'s answer is that composition, not assignability, is the thing it
+sells.

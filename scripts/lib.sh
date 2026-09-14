@@ -26,6 +26,103 @@ for f in */go.mod; do
 done
 [ ${#MODULES[@]} -gt 0 ] || svcrt_fail "no library modules found (expected */go.mod)"
 
+# --- sibling imports ---------------------------------------------------------
+#
+# No svcrt library module imports another. That has always been true and,
+# until R6, nothing checked it -- it held by habit, exactly the way the
+# zero-requires rule did before R5 wrote it down. `kit` is the first
+# deliberate violation (conventions.md §11), which makes this the moment to
+# gate it rather than the moment to stop caring: a core module that starts
+# requiring a sibling must fail here, by name.
+#
+# SIBLING_ALLOWED is shaped "<module>=<why>" for the same reason DEP_EXEMPT
+# and COUNT_EXEMPT are: once a list is just names, "someone forgot" and
+# "someone decided" become indistinguishable.
+SIBLING_ALLOWED=(
+  "kit=composes httpclient, resilience, telemetry and logging into the orderings R5 proved fail silently when inverted; a composition module cannot compose without importing what it composes. It is opt-in and nothing imports it, so the coupling is paid only by callers who asked for it"
+)
+
+# The greps are deliberately greppable themselves -- one regex, listed here,
+# so a reader can run it by hand against a go.mod and get the same answer CI
+# does. The `module` line cannot match (it carries no version) and `=>` lines
+# are dropped so a replace directive is never read as a require.
+SIBLING_REQUIRE_RE='^[[:space:]]*(require[[:space:]]+)?github\.com/pavelpascari/svcrt/[A-Za-z0-9_-]+[[:space:]]+v'
+SIBLING_UNPUBLISHED_RE="$SIBLING_REQUIRE_RE"'0\.0\.0([[:space:]]|$)'
+
+# sibling_requires prints module $1's require lines that name a sibling;
+# sibling_unpublished narrows that to the ones at v0.0.0. Both print nothing
+# and succeed when there are none.
+sibling_requires()    { grep -E "$SIBLING_REQUIRE_RE" "$1/go.mod" | grep -v '=>' || true; }
+sibling_unpublished() { grep -E "$SIBLING_UNPUBLISHED_RE" "$1/go.mod" | grep -v '=>' || true; }
+
+# INVERSE direction: a module requiring a sibling without permission. This is
+# the half that carries the invariant, and before R6 nothing checked it at
+# all -- which is how an invariant that is merely true differs from one that
+# is enforced.
+for m in "${MODULES[@]}"; do
+  reqs=$(sibling_requires "$m")
+  [ -n "$reqs" ] || continue
+  allowed=false
+  for e in ${SIBLING_ALLOWED[@]+"${SIBLING_ALLOWED[@]}"}; do
+    case "$e" in "$m="*) allowed=true ;; esac
+  done
+  $allowed || svcrt_fail "$m requires a sibling svcrt module:
+$reqs
+No core module imports another (conventions.md §11), and kit is the only
+module permitted to, because composition is its entire job. If $m genuinely
+must, that is a design change and needs the argument written down in
+conventions.md §11 plus an entry in SIBLING_ALLOWED in scripts/lib.sh."
+done
+
+# FORWARD direction, plus staleness, in one pass. An entry naming a module
+# that does not exist -- or one that no longer requires any sibling -- permits
+# nothing while still reading as a considered decision, which is the same lie
+# a stale DEP_EXEMPT entry tells.
+for e in ${SIBLING_ALLOWED[@]+"${SIBLING_ALLOWED[@]}"}; do
+  key=${e%%=*}
+  found=false
+  for m in "${MODULES[@]}"; do
+    if [ "$m" = "$key" ]; then found=true; fi
+  done
+  $found || svcrt_fail "SIBLING_ALLOWED names '$key', which is not a module on disk. That permission is doing nothing. Fix the name or drop it."
+  [ "$e" != "$key" ] || svcrt_fail "SIBLING_ALLOWED entry '$e' carries no reason. Write it as '$key=<why this module may import siblings>'."
+  [ -n "$(sibling_requires "$key")" ] || svcrt_fail "SIBLING_ALLOWED permits '$key' to import siblings, but $key/go.mod requires none. Drop the now-false permission from SIBLING_ALLOWED in scripts/lib.sh."
+done
+
+# WORKSPACE_MODULES / STANDALONE_MODULES: which bucket a module is tested in.
+#
+# ci.sh runs the libraries under GOWORK=off on purpose -- go.work masks
+# version skew locally, so CI must run without it -- but that gate encodes an
+# invariant a module requiring a sibling at v0.0.0 cannot satisfy: v0.0.0
+# resolves to nothing, because no module in this repo is tagged yet. `kit` is
+# not useful without other svcrt modules present; that is its whole purpose,
+# and a gate asserting the opposite is asserting the wrong thing about it.
+# The exemplars already have exactly this carve-out, for exactly this reason.
+#
+# Derived from disk rather than listed, for the same reason MODULES and
+# EXEMPLARS are: a module added later must not be silently ungated. It is also
+# self-healing -- once the siblings are tagged and these requires name a real
+# version, the module resolves standalone, falls back into the STANDALONE
+# bucket on its own, and there is no stale exemption for anyone to remember to
+# remove.
+WORKSPACE_MODULES=()
+STANDALONE_MODULES=()
+for m in "${MODULES[@]}"; do
+  if [ -n "$(sibling_unpublished "$m")" ]; then
+    WORKSPACE_MODULES+=("$m")
+  else
+    STANDALONE_MODULES+=("$m")
+  fi
+done
+
+# A module must land in exactly one bucket, and the buckets together must
+# account for every module. A partition that silently loses a module is the
+# failure this whole split exists to avoid: the module would be tested by
+# neither loop while ci.sh still printed OK.
+[ $(( ${#STANDALONE_MODULES[@]} + ${#WORKSPACE_MODULES[@]} )) -eq ${#MODULES[@]} ] ||
+  svcrt_fail "the standalone/workspace split lost a module: ${#STANDALONE_MODULES[@]} + ${#WORKSPACE_MODULES[@]} != ${#MODULES[@]}. Some module would be tested by neither loop."
+[ ${#STANDALONE_MODULES[@]} -gt 0 ] || svcrt_fail "no module builds standalone; the GOWORK=off gate is testing nothing"
+
 # A module that legitimately keeps real dependencies, as "<module>=<why>".
 # Zero requires is the default (spec §8.2) because a library that costs
 # nothing extra to pull in is the whole point of shipping it separately -- an
@@ -81,7 +178,19 @@ done
 # one tracer shared by every concurrent request, and the recording stubs
 # shared across parallel subtests. That is the R3 failure shape exactly, and
 # it is the reason this line is written by hand rather than derived.
-COUNT_MODULES=(lifecycle httpserver resilience telemetry)
+#
+# kit joined at R6 by the same judgement and against the same silence: its
+# non-test source is three constructors and a slice literal, matches none of
+# COUNT_CONCURRENCY_RE, and holds no shared mutable state of its own -- so the
+# heuristic would have said nothing and kit would have been silently absent,
+# which is the R3 failure exactly. It is here anyway because what kit produces
+# is one *http.Client that a service shares across every goroutine it has, and
+# kit is the ONLY place the composed chain runs as a whole: resilience and
+# telemetry each get ten runs in their own module, unwired, and a race that
+# exists only between them -- Retry replaying a request the span middleware
+# still holds -- is visible nowhere else. The composition is the artifact, so
+# the composition gets the gate. It costs about two seconds.
+COUNT_MODULES=(lifecycle httpserver resilience telemetry kit)
 
 # A module that looks concurrent by the heuristic below but is deliberately
 # NOT in COUNT_MODULES, as "<module>=<why>". Empty is the healthy state.

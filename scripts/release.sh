@@ -52,6 +52,20 @@ fi
 # "hangs one run in fifty" gets ten runs. Tagging is the point after which a
 # version is permanent, so this is the last place that policy can still be
 # applied -- it must not be weaker here than in CI.
+# A module requiring a sibling at v0.0.0 cannot be verified in isolation --
+# that version resolves to nothing -- and tagging it would publish a go.mod
+# nobody outside this workspace can resolve. Refusing is the right answer; say
+# WHY, because the raw failure is a `go list` error four lines down that reads
+# like a broken toolchain rather than a missing prerequisite. Derived in
+# lib.sh, so this clears itself once the siblings are tagged.
+for w in ${WORKSPACE_MODULES[@]+"${WORKSPACE_MODULES[@]}"}; do
+  [ "$w" = "$module" ] || continue
+  echo "$module requires a sibling svcrt module at v0.0.0:" >&2
+  sibling_unpublished "$module" >&2
+  echo "That version resolves to nothing, so $module cannot be verified in isolation and a tag would publish a go.mod no consumer can resolve. Tag those siblings first, point $module/go.mod at the versions you tagged, then tag $module. Refusing to tag." >&2
+  exit 1
+done
+
 echo "verifying $module in isolation..."
 (cd "$module" && GOWORK=off go vet ./...)
 (cd "$module" && GOWORK=off go test -race -count=$(count_for "$module") ./...)
