@@ -3,12 +3,10 @@ package main
 import (
 	"context"
 	"errors"
-	"net/http"
-	"net/http/httptest"
-	"sync/atomic"
 	"testing"
 
 	"github.com/pavelpascari/svcrt/resilience"
+	"github.com/pavelpascari/svcrt/testkit"
 )
 
 // TestAcceptanceBreakerStopsCallingADeadUpstream drives the REAL buildStack
@@ -26,14 +24,9 @@ import (
 // one. So each Quote is exactly one upstream request, and the count is a
 // direct read of when the circuit opened.
 func TestAcceptanceBreakerStopsCallingADeadUpstream(t *testing.T) {
-	var hits atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer upstream.Close()
+	upstream := testkit.Upstream(t, testkit.Status(500))
 
-	s := newStack(t, 0, upstream.URL)
+	s := newStack(t, 0, upstream.URL())
 
 	const calls = 8
 	var lastErr error
@@ -41,7 +34,7 @@ func TestAcceptanceBreakerStopsCallingADeadUpstream(t *testing.T) {
 		_, lastErr = s.pricing.Quote(context.Background(), "sku-1")
 	}
 
-	if got := hits.Load(); got != breakerThreshold {
+	if got := upstream.Requests(); got != breakerThreshold {
 		t.Fatalf("upstream saw %d requests across %d calls, want %d: the breaker is not in the production chain, or its threshold did not reach it",
 			got, calls, breakerThreshold)
 	}
@@ -57,15 +50,9 @@ func TestAcceptanceBreakerStopsCallingADeadUpstream(t *testing.T) {
 // that only proves the circuit opens would pass just as well if it opened
 // immediately and never closed.
 func TestAcceptanceBreakerLeavesAHealthyUpstreamAlone(t *testing.T) {
-	var hits atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"amount_minor":1250}`))
-	}))
-	defer upstream.Close()
+	upstream := testkit.Upstream(t, testkit.JSON(200, `{"amount_minor":1250}`))
 
-	s := newStack(t, 0, upstream.URL)
+	s := newStack(t, 0, upstream.URL())
 
 	const calls = 8
 	for i := range calls {
@@ -77,7 +64,7 @@ func TestAcceptanceBreakerLeavesAHealthyUpstreamAlone(t *testing.T) {
 			t.Fatalf("call %d amount = %d, want 1250", i, amount)
 		}
 	}
-	if got := hits.Load(); got != calls {
+	if got := upstream.Requests(); got != calls {
 		t.Fatalf("upstream saw %d of %d requests; the breaker opened on a healthy upstream", got, calls)
 	}
 }
