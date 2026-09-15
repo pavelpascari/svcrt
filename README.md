@@ -19,7 +19,8 @@ never owns your process — you write `main()`.
 | `httpclient` | An `http.Client` with connection-pool and timeout defaults that are hard to get wrong, and a `RoundTripper` middleware seam mirroring `httpserver`'s. |
 | `resilience` | Retry with backoff, per-attempt timeouts, and a circuit breaker, as `RoundTripper` middleware. Refuses to retry what it cannot safely replay, and stops calling a dependency that is plainly dead. |
 | `telemetry` | OpenTelemetry tracing and metrics for HTTP servers and clients, plus the log extractor that correlates them. The only module with external dependencies, and the API only — never the SDK. |
-| `kit` | Composes the others into the stacks a service actually wants. Opt-in, and the only module that imports siblings. |
+| `kit` | Composes the others into the stacks a service actually wants. Opt-in, and one of the two modules that import siblings. |
+| `testkit` | Test helpers for services built on svcrt: log capture, a scripted stub upstream, and assertions on `contract` errors. Imports `contract` and `logging`, never `testing`. For consumers — svcrt's own core modules may not use it (`docs/conventions.md` §11). |
 
 Each is versioned independently, with a per-module tag prefix —
 `contract/v0.1.0`, `config/v0.1.0`. `contract` is *intended* to freeze at v1
@@ -63,18 +64,19 @@ versus keep and test it, and why a supplied test suite is a floor.
 
 `go.work` is a local convenience. CI runs the library modules with
 `GOWORK=off`, because the workspace masks the version skew consumers would hit.
-The exception is any module requiring a sibling at `v0.0.0` — `kit` and the
-exemplars — which cannot build standalone until there is something to depend
-on; CI detects that from disk and runs those with the workspace instead.
+The exception is any module requiring a sibling at `v0.0.0` — `kit`, `testkit`
+and the exemplars — which cannot build standalone until there is something to
+depend on; CI detects that from disk and runs those with the workspace instead.
 
 ## Status
 
-R7. All nine modules are implemented: `contract`, `config`, `logging`,
-`lifecycle`, `httpserver`, `httpclient`, `resilience`, `telemetry` and `kit`.
-`testkit` is still planned — see `docs/superpowers/specs/`.
+R8. All ten modules are implemented: `contract`, `config`, `logging`,
+`lifecycle`, `httpserver`, `httpclient`, `resilience`, `telemetry`, `kit` and
+`testkit`. `testkit` was the last one still listed as planned; R8 shipped it.
 
-**Nothing is tagged yet.** `git tag` is empty, which is why `kit` and the
-exemplars require their siblings at `v0.0.0` and resolve through `go.work`.
+**Nothing is tagged yet.** `git tag` is empty, which is why `kit`, `testkit`
+and the exemplars require their siblings at `v0.0.0` and resolve through
+`go.work`.
 Until a first release, removing an exported name is free; after it, it is a
 major version bump on every module that carries the name.
 
