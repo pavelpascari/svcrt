@@ -688,16 +688,57 @@ literal has no observer, not merely one the current tests happen to miss.
 
 ## `resilience` Module
 
-**Mutation Score: 0.943548 (117 passed, 7 failed, total 124), with 100%
-statement coverage.** Measured at the R3 final-review fix wave by running
-`./scripts/mutation.sh resilience`, which printed exactly that line; the
-seven survivors were enumerated from the same worktree with
+**Mutation Score: 0.953488 (164 passed, 8 failed, 13 duplicated, total
+172), with 100% statement coverage.** Measured at R7 Task 4 by running
+`./scripts/mutation.sh resilience`, which printed exactly that score; the
+eight survivors were enumerated from the same worktree with
 `go-mutesting ./...` and each diffed against its `.original`. That is the
 whole provenance -- this file's value is that its provenance statements are
 literally true, so a score here is either a run someone did and recorded, or
 it does not belong.
 
-The previous figure, 0.938053 (106 passed, 7 failed, total 113), was
+Seven of those eight are the R3 survivors already written up below,
+unchanged in shape and still equivalent: `backoff.go.9`, `backoff.go.10`,
+`backoff.go.15`, `retryafter.go.1`, `retryafter.go.4`, `retryafter.go.10`
+and `retryafter.go.24`. The eighth, `breaker.go.20`, is new in R7 and has
+its own section.
+
+R7 added `breaker.go` and the total moved 124 -> 172. **The module's first
+run with the breaker in it scored 0.906977 -- sixteen survivors, nine of
+them in `breaker.go` -- and eight of those nine were killed rather than
+justified.** They are listed here because a file of equivalence arguments
+should also record how often the equivalence argument was the wrong answer:
+
+| mutant | the killing test |
+|---|---|
+| `defaultFailureThreshold` `5` -> `4` and `5` -> `6` | `TestTheDefaultFailureThresholdIsFiveConsecutiveFailures` |
+| `defaultCooldown` `30s` -> `29s` and `30s` -> `31s` | `TestTheDefaultCooldownIsThirtySeconds` |
+| `defaultTripIf`'s `resp.StatusCode >= 500` -> `>= 499` | `TestBreakerDoesNotTripBelowFiveHundred` |
+| `record`'s `b.fails = 0` -> `b.fails = -1` | `TestBreakerSuccessResetsTheCountToZeroExactly` |
+| `withDefaults`' `if p.Cooldown <= 0` -> `<= 1` | `TestACooldownOfOneNanosecondIsHonoured` |
+| `allow`'s half-open `b.probing = true` -> `_ = b.probing` | `TestTheProbeSlotIsStillExclusiveAfterAPanickingProbe` |
+
+Each was killed by applying the mutation to `breaker.go` by hand, running
+the named test, and watching it fail with the message quoted in that test --
+not by writing a test that looked sufficient.
+
+Two of them are worth naming, because both had an existing test that looked
+like it covered the code and did not. `b.fails = -1` passes
+`TestBreakerSuccessResetsTheCount`, which only proves the reset lands LOW
+enough for two failures either side of a success not to trip a threshold of
+three; the mutant quietly costs every caller one extra failure before the
+circuit can reopen, and the new test counts from the other side (after a
+success, *exactly* `FailureThreshold` failures must open it). And
+`b.probing = true` in `allow`'s half-open branch is reachable only after a
+*panicking* probe -- every transport that returns passes through `record`,
+which leaves the circuit open or closed, never half-open --
+so `TestAPanickingTransportDoesNotStrandTheProbe`, which sends exactly one
+request after the panic, could prove the slot was re-claimable but not that
+it was still exclusive.
+
+The previous figure, 0.943548 (117 passed, 7 failed, total 124), was
+measured at the R3 final-review fix wave by running the same script. The one
+before that, 0.938053 (106 passed, 7 failed, total 113), was
 measured on `0dccfa1`, the commit that killed the two saturation mutants
 the correction below describes; before that fix the module scored 0.920354
 (104/113), and that +2 is visible evidence the correction was a real fix
@@ -950,6 +991,75 @@ clamps to `0` and this mutant does not (`-1ns < -1ns` is false), returning
 to carry sub-second precision the header's whole-second HTTP-date format
 does not -- an ordinary "now vs. a parsed header" pair can only differ by a
 whole number of seconds and would never exercise this boundary at all.
+
+### `breaker.go.20`: `record`'s `b.state == stateHalfOpen ||` clause (`-> false ||`)
+
+```go
+b.fails++
+// A failed probe re-opens immediately, without waiting for the threshold:
+// the upstream was just asked one question and got it wrong.
+if b.state == stateHalfOpen || b.fails >= b.p.FailureThreshold {
+	b.state = stateOpen
+	b.openedAt = b.p.now()
+}
+```
+
+The mutant replaces the first operand with `false`. It is the one `breaker.go`
+survivor of the nine that was not killed, and it is equivalent **for the
+current implementation only**.
+
+The argument is two sentences long: `fails` is reset in exactly one place --
+the non-tripping branch of `record` -- and that same branch sets the state to
+`stateClosed`. So no reachable state is half-open with `fails` below the
+threshold, the second operand is already true wherever the first one is, and
+the clause can never be the deciding term.
+
+**That argument is not the evidence.** R3 shipped an equivalence argument from
+this module that was algebraically sound and false (integer truncation on an
+odd bound; see the correction above), so the invariant it rests on is
+model-checked instead of asserted.
+
+**What was executed.**
+`TestNoReachableStateIsHalfOpenWithoutAFullFailureCount`
+(`breaker_internal_test.go`) does a breadth-first search over the state space
+the breaker can actually reach. The abstract state is
+`{state, fails, probing, elapsed}` -- `fails` saturated at `threshold+1`,
+since nothing in the machine reads it except `fails >= threshold`, and
+`elapsed` a boolean for "the cooldown has passed since `openedAt`". The edges
+are the four operations that mutate the machine (`allow`, `record(true)`,
+`record(false)`, `releaseProbe`), each applied to a `breaker` loaded directly
+from the abstract state, plus "time passes" as an extra edge out of every
+state. Every state it dequeues that is half-open is asserted to carry
+`fails >= threshold`; the search reached 8+ states and the test fails if it
+reaches none that are half-open, so it cannot pass vacuously.
+
+Three runs back the entry, all at R7 Task 4:
+
+1. **The mutant survives.** `b.state == stateHalfOpen ||` replaced with
+   `false ||` in `breaker.go`, `go test ./resilience/` -- the whole suite
+   green. That is what makes this a survivor rather than a defect.
+2. **The model check is live, not decorative.** Adding `b.fails = 0` to the
+   opening branch -- a plausible future tidy-up -- makes it FAIL, naming the
+   reachable counterexample: `{state:2 fails:0 probing:true elapsed:true}`.
+3. **The clause is what stands between that tidy-up and a liveness bug.**
+   With `b.fails = 0` added AND the clause dropped -- i.e. the mutant plus the
+   future change -- `TestFailedProbeReopensForAnotherFullCooldown` fails with
+   "a failed probe did not re-open the circuit", alongside the model check.
+   The machine then sits half-open forever: `releaseProbe` clears the slot
+   after every failed probe, so the breaker admits **one probe per request**
+   at an upstream that has just demonstrated it is unwell -- precisely the
+   burst the half-open state exists to prevent.
+
+**Why the guard is kept rather than deleted** (`docs/conventions.md` §3, whose
+rule is to delete a clause that is inert through *every* path including a
+direct call). This one is not: `record` is an unexported method, and
+half-open-with-`fails`-below-threshold is a perfectly constructible input at
+its own level -- the model check constructs it by the dozen. It is the
+`decodeText` `!ok` case, not the `TrimSpace` case. Deleting it would make
+`record`'s correctness depend on an invariant maintained by a *different*
+branch of the same function, which is exactly the coupling run 3 shows
+failing. The clause states the rule the doc comment states in prose; the
+`fails` bookkeeping only happens to imply it.
 
 ## `examples/orders` Module
 
