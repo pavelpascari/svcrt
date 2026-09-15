@@ -12,6 +12,14 @@ import (
 	"github.com/pavelpascari/svcrt/resilience"
 )
 
+// breakerThreshold is how many consecutive pricing failures open the circuit.
+//
+// Named rather than written inline so the acceptance test can assert against
+// the same number this wiring uses. A test carrying its own copy of the value
+// still passes when the wiring changes underneath it, which is the failure
+// mode this whole file exists to avoid.
+const breakerThreshold = 3
+
 // appStack is the health/lifecycle/api/admin composition. It is built by
 // buildStack, the one function main and the acceptance tests both call --
 // so a regression in this wiring (a dropped OnDrain, an ignored DrainDelay,
@@ -108,6 +116,7 @@ func buildStack(cfg appStackConfig) *appStack {
 			MaxAttempts: 3,
 			Backoff:     resilience.Constant(10 * time.Millisecond),
 		},
+		Breaker: resilience.BreakerPolicy{FailureThreshold: breakerThreshold},
 	}))
 	lc.Add("pricing-client",
 		func(context.Context) error { return nil },

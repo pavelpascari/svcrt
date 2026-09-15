@@ -122,3 +122,41 @@ func TestAccessLogLosesTheTraceIDWhenTelemetryIsInnermost(t *testing.T) {
 			"both it and this test must be updated together")
 	}
 }
+
+// TestAcceptanceProductionHandlerCorrelatesItsAccessLog closes a gap the other
+// tests in this file leave open: they build their own middleware chain, so
+// none of them fails if telemetry.Server is deleted from newServer -- the one
+// place production actually wires it.
+//
+// Removing it used to change nothing here. newTestServer builds its logger
+// with plain logging.New and no extractor, so no existing test can observe
+// trace context at all, and the absence of a span looks identical to a logger
+// that was never going to report one.
+//
+// This drives the PRODUCTION newServer with a logger that can see spans, so
+// deleting telemetry.Server from that chain fails here.
+func TestAcceptanceProductionHandlerCorrelatesItsAccessLog(t *testing.T) {
+	t.Parallel()
+
+	const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+
+	var buf bytes.Buffer
+	log := logging.New(&buf, logging.Options{Level: slog.LevelDebug}, telemetry.LogExtractor())
+	svc := NewService(openStore(map[string]*Order{"1": {ID: "1", Qty: 3}}))
+
+	req := httptest.NewRequest(http.MethodGet, "/orders/1", nil)
+	req.Header.Set("traceparent", traceparent)
+	newServer(svc, log).ServeHTTP(httptest.NewRecorder(), req)
+
+	out := buf.String()
+	if !strings.Contains(out, traceID) {
+		t.Fatalf("the production access log carries no trace id, so telemetry.Server is not in newServer's chain:\n%s", out)
+	}
+	// Route and trace id on the SAME line: the ordering that R4 and R5 both
+	// pinned, asserted here against the production wiring rather than a
+	// locally assembled one.
+	if !strings.Contains(out, "GET /orders/{id}") {
+		t.Errorf("access log lost its route while carrying a trace id:\n%s", out)
+	}
+}
