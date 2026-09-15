@@ -1,6 +1,7 @@
 package kit
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -201,5 +202,81 @@ func TestClientOptionsHTTPTimeoutReachesHttpclientNew(t *testing.T) {
 
 	if _, err := c.Get(up.URL); err == nil {
 		t.Fatal("expected a timeout error, got nil -- ClientOptions.HTTP.Timeout did not reach httpclient.New")
+	}
+}
+
+// TestNewClientBreakerSitsOutsideRetry is the ordering assertion. Inside Retry,
+// one three-attempt burst would trip a threshold-2 breaker even though the
+// call ultimately succeeded.
+func TestNewClientBreakerSitsOutsideRetry(t *testing.T) {
+	up, hits := flakyUpstream(t, 2) // fails twice, then succeeds
+
+	c := NewClient(ClientOptions{
+		Retry:   fastRetry(),
+		Breaker: resilience.BreakerPolicy{FailureThreshold: 2},
+	})
+
+	resp, err := c.Get(up.URL)
+	if err != nil {
+		t.Fatalf("the retried call failed; the breaker counted attempts, not calls: %v", err)
+	}
+	resp.Body.Close()
+
+	if got := hits.Load(); got != 3 {
+		t.Fatalf("upstream saw %d requests, want 3", got)
+	}
+
+	// The call succeeded, so the breaker must still be closed.
+	resp, err = c.Get(up.URL)
+	if err != nil {
+		t.Fatalf("breaker opened after a call that succeeded: %v", err)
+	}
+	resp.Body.Close()
+}
+
+// TestNewClientBreakerOpensOnSustainedFailure: the breaker is on by default.
+func TestNewClientBreakerOpensOnSustainedFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := NewClient(ClientOptions{
+		Retry:   resilience.Policy{MaxAttempts: 1},
+		Breaker: resilience.BreakerPolicy{FailureThreshold: 2},
+	})
+
+	for range 2 {
+		resp, err := c.Get(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	if _, err := c.Get(srv.URL); !errors.Is(err, resilience.ErrOpen) {
+		t.Fatalf("error = %v, want ErrOpen", err)
+	}
+}
+
+// TestDisableBreakerRemovesItEntirely. The negative flag exists because no
+// zero value of BreakerPolicy can mean "no breaker at all".
+func TestDisableBreakerRemovesItEntirely(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := NewClient(ClientOptions{
+		Retry:          resilience.Policy{MaxAttempts: 1},
+		Breaker:        resilience.BreakerPolicy{FailureThreshold: 2},
+		DisableBreaker: true,
+	})
+
+	for i := range 5 {
+		resp, err := c.Get(srv.URL)
+		if err != nil {
+			t.Fatalf("request %d refused with the breaker disabled: %v", i, err)
+		}
+		resp.Body.Close()
 	}
 }
