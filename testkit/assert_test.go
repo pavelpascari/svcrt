@@ -45,6 +45,17 @@ func TestAssertCodeFailsWhenItShould(t *testing.T) {
 		"nil error":      {nil, "order_not_found"},
 		"plain error":    {errors.New("not coded"), "order_not_found"},
 		"empty want":     {codedOnly{code: "x"}, ""},
+
+		// The two below pin the no-code branch INDEPENDENTLY of the
+		// comparison that follows it. Without them, deleting the branch
+		// entirely is invisible: Code returns "" when it finds no code, so
+		// `got != want` fails on its own for every want above, with a
+		// different message and the same verdict. It stops doing that the
+		// moment want is "" -- and then AssertCode(t, nil, "") passes,
+		// silently, against an error carrying no code at all. A mutation run
+		// found exactly that (docs/mutation-survivors.md, R8).
+		"no code, empty want":   {errors.New("not coded"), ""},
+		"nil error, empty want": {nil, ""},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

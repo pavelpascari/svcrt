@@ -26,7 +26,9 @@ own section below. `kit` scores 1.000 on a population of **two** mutants and
 has the most emphatic entry of the lot under the same exception: it is a
 module made entirely of argument order and struct-literal copies, so the
 score is close to vacuous and the evidence is a table of executed inversions
-instead.
+instead. `testkit` (R8) is the counterweight to that entry: 56 mutants, one
+survivor, and the survivor is a tooling artifact rather than an equivalence
+argument — see its own section below.
 
 **1.000 is not "everything is covered."** go-mutesting does not mutate
 struct-literal field assignments, so a whole class of wiring bug is invisible
@@ -1434,3 +1436,125 @@ if `kit` ever grows a branch or a literal of its own, that is a signal worth
 noticing rather than a routine change: `kit` declares no defaults, precisely so
 there is no defaulting logic here to get wrong (spec §5), and the mutant count
 rising above two means something now has a second source of truth.
+
+## `testkit` Module
+
+**Mutation Score: 0.982143 (55/56), 1 surviving mutant — a go-mutesting
+tooling artifact, justified below by execution.** Threshold 0.85.
+
+The population is worth stating next to `kit`'s, because R6 warned the
+opposite way round. `kit` scored 1.000 on **two** mutants and the number meant
+almost nothing. `testkit` generates **56** across three files: the script index
+clamp in `Upstream.next`, the `errors.As` guards in `AssertCode` and
+`AssertParams`, the level/message/time switch in `recordFrom`, the
+empty-script and zero-status defaults, the `len(all) == 0` guard in `Last`.
+There is real behaviour here and the gate can see it.
+
+### The survivor that was NOT equivalent: `assert.go.1`, `AssertCode`'s no-code branch
+
+The first run scored 0.964286 (54/56) with two survivors. One of them was a
+real hole, and it is exactly the shape §4 of `conventions.md` warns about — a
+guard whose deletion is masked by the code that follows it.
+
+```
+ 	got, ok := Code(err)
+ 	if !ok {
+-		tb.Fatalf("error does not carry a contract code: %v", err)
+-		return
++		_, _ = tb.Fatalf, err
+ 	}
+ 	if got != want {
+ 		tb.Fatalf("error code = %q, want %q", got, want)
+ 	}
+```
+
+Deleting the branch leaves `AssertCode` still failing for every case the table
+had, because `Code` returns `""` when it finds no code and `"" != want` is
+true for every non-empty `want`. The verdict is the same and only the message
+differs, so nothing noticed.
+
+It stops being the same the moment `want` is `""`. Then
+`AssertCode(t, nil, "")` — or `AssertCode(t, errors.New("boom"), "")` — passes
+**silently** against an error carrying no contract code at all. For a package
+whose entire justification is that an assertion which cannot fail is worse
+than no assertion, that is a defect, not an equivalence.
+
+Executed, both directions, not argued:
+
+1. The mutant was applied to `assert.go` in a worktree at HEAD and the whole
+   suite run: `ok github.com/pavelpascari/svcrt/testkit` — survivor
+   reproduced.
+2. Two cases were added to `TestAssertCodeFailsWhenItShould`
+   (`"no code, empty want"` and `"nil error, empty want"`) and the suite re-run
+   against the same mutant: **FAIL**, both new subtests, `AssertCode(<nil>,
+   "") did not fail`.
+3. `assert.go` was restored and the suite re-run: green.
+
+The cases pin the no-code branch **independently of the comparison that
+follows it**, which is the general lesson: when two guards can produce the
+same verdict for the inputs a table happens to carry, the table is testing one
+of them.
+
+`AssertParams`' matching branch is not in the same position, and the run shows
+why it needs no such case: deleting its `return` leaves `detailed` nil, so
+`detailed.ErrorParams()` panics and every mutant of it dies immediately.
+
+### `logger.go.3`: a byte-identical mutant (`case slog.TimeKey:`)
+
+The remaining survivor is the same class `config`'s preamble and
+`resilience`'s `retryafter.go.1` already name: a **tooling artifact, not a
+code equivalence**.
+
+`branch/case` generates one mutant per arm of `recordFrom`'s switch by
+deleting that arm's body. Three arms have bodies and all three mutants are
+killed. The fourth arm has none:
+
+```go
+case slog.TimeKey:
+	// dropped: a timestamp is never what a test asserts on
+```
+
+Deleting nothing produces the original program. Confirmed by execution rather
+than by reading — the mutator was isolated with
+`--disable` on the other fourteen and the mutants saved with
+`--no-exec --do-not-remove-tmp-folder`:
+
+```
+$ cmp -s logger.go.original logger.go.2 && echo IDENTICAL
+IDENTICAL
+$ shasum logger.go.original logger.go.2
+69668f8718083d975447ea9f1b054dccaeac1162  logger.go.original
+69668f8718083d975447ea9f1b054dccaeac1162  logger.go.2
+```
+
+Same SHA-1. No test can distinguish two identical programs, so 55/56 is this
+module's ceiling while that arm stays empty — and it should stay empty. The
+arm is load-bearing *as an omission*: without it, `slog`'s time key would land
+in `Record.Attrs` and every attribute assertion in every consumer would be
+written against a map containing a timestamp that changes each run. Its
+deletion is caught by `TestLoggerCapturesLevelMessageAndAttrs`' sibling
+behaviour, not by this mutant.
+
+(The id drifts. Under the full run it is reported as `logger.go.3`; isolating
+`branch/case` alone renumbers it `logger.go.2`. Match it by the code, as the
+preamble says — it is the `slog.TimeKey` arm either way. A second tell is that
+go-mutesting prints an **empty diff** for it, which is itself the symptom.)
+
+### What this module cannot be told about by the gate
+
+Two things, both already implied by the preamble but sharper here because
+`testkit` is a *test* package and the usual reasoning inverts.
+
+**A helper's failure path is only as good as its fake.** Every mutant in
+`assert.go` is killed by a test that asserts the assertion FAILED, through
+`fakeTB`. Without that fake there would be no failing-case tests at all, every
+`Assert*` mutant that removes a `Fatalf` would survive, and the score would
+read somewhere near 0.6 while the package looked fully covered at 100%
+statements. The fake is the instrument, and `testkit`'s own `TB` interface
+exists to make it writable (`docs/conventions.md` §11).
+
+**Concurrency is invisible here as everywhere.** `Records` and `Server` are
+mutex-guarded and the gate cannot see a dropped `Lock`. That is what
+`COUNT_MODULES` is for; `testkit` joined it at R8, and it is the first module
+the inverse heuristic in `scripts/lib.sh` would have caught unaided rather
+than needing the judgement `telemetry` and `kit` each needed.
