@@ -24,7 +24,7 @@ fi
 [ -z "$unformatted" ] || fail "gofmt -l found unformatted files:
 $unformatted"
 
-for m in "${MODULES[@]}"; do
+for m in "${STANDALONE_MODULES[@]}"; do
   echo "== $m =="
 
   # Spec P2: useful with no other svcrt module present. GOWORK=off is the
@@ -48,6 +48,67 @@ for m in "${MODULES[@]}"; do
   else
     [ "$n" -eq 1 ] || fail "$m: has module dependencies ($n lines from 'go list -m all')"
   fi
+done
+
+# Modules that require a sibling at v0.0.0 cannot be built standalone at all:
+# v0.0.0 resolves to nothing, because nothing in this repo is tagged. They run
+# WITH the workspace, exactly as the exemplars below do and for the same
+# reason, and lib.sh derives which ones those are from disk. The label says
+# "workspace" out loud so a reader of CI output can see which modules did not
+# get the GOWORK=off treatment rather than having to infer it.
+#
+# The zero-requires assertion above does not apply here -- these modules have
+# requires by construction, and SIBLING_ALLOWED in lib.sh records which module
+# is permitted to and why. What replaces it is the check below: an import that
+# is neither a sibling nor something a sibling already brings is a dependency
+# this module invented, and "adopting a core module costs you nothing" is the
+# property that would break (conventions.md §11).
+for m in ${WORKSPACE_MODULES[@]+"${WORKSPACE_MODULES[@]}"}; do
+  echo "== $m (workspace; requires an untagged sibling) =="
+
+  (cd "$m" && go vet ./...) || fail "$m: go vet"
+  (cd "$m" && go test -race -count=$(count_for "$m") ./...) || fail "$m: go test"
+
+  # Every non-sibling require must already be required by one of the siblings
+  # this module composes. That keeps the composition free: a service adopting
+  # it inherits only what the pieces it asked for already cost.
+  #
+  # Stated plainly, this is weaker than `go list -m all` under GOWORK=off and
+  # in one specific way: it matches on module path, not version, so it does
+  # not see the version skew that GOWORK=off exists to expose. There is no
+  # cheap way to recover that for a module whose requires cannot resolve;
+  # it comes back on its own when the siblings are tagged and this module
+  # returns to the standalone loop.
+  sibling_mods=$(sibling_requires "$m" |
+    sed -E 's|^[[:space:]]*(require[[:space:]]+)?github\.com/pavelpascari/svcrt/||; s|[[:space:]].*||')
+  externals=$(grep -E '^[[:space:]]*(require[[:space:]]+)?[^[:space:]]+\.[^[:space:]/]+/[^[:space:]]+[[:space:]]+v' "$m/go.mod" |
+    grep -v '=>' | grep -v '// indirect' |
+    sed -E 's|^[[:space:]]*(require[[:space:]]+)?||; s|[[:space:]].*||' |
+    grep -v '^github\.com/pavelpascari/svcrt/' || true)
+  for path in $externals; do
+    found=false
+    for s in $sibling_mods; do
+      if grep -qF "$path v" "$s/go.mod"; then found=true; fi
+    done
+    $found || fail "$m requires $path, which none of the siblings it composes requires. A composition module must not invent dependencies of its own -- adopting it would then cost more than adopting the pieces it composes (conventions.md §11)."
+  done
+done
+
+# Spec §4.2: kit composes the client side and deliberately does NOT import
+# httpserver -- the asymmetry is a design decision (a service builds one
+# handler chain in one visible place, but a client per upstream), and a
+# deliberate omission that nothing enforces is a comment. Asserted
+# structurally, here, alongside contract's import assertion below.
+#
+# TestImports counts as much as Imports: a test that reached for httpserver
+# would put it in kit/go.mod, which is the coupling being prevented.
+kitimports=$(cd kit && go list -f '{{join .Imports "\n"}}
+{{join .TestImports "\n"}}' ./... | sort -u)
+for i in $kitimports; do
+  case "$i" in
+    github.com/pavelpascari/svcrt/httpserver*)
+      fail "kit imports $i. kit ships no server-side helper and must not import httpserver (spec §4.2): the server ordering stays the caller's, documented on telemetry.Server. If that decision is being reversed, reverse it in the spec first." ;;
+  esac
 done
 
 # Spec §4.1: contract imports "context" and nothing else.

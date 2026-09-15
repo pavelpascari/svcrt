@@ -12,9 +12,9 @@ import (
 	"os"
 
 	"github.com/pavelpascari/svcrt/config"
+	"github.com/pavelpascari/svcrt/kit"
 	"github.com/pavelpascari/svcrt/lifecycle"
 	"github.com/pavelpascari/svcrt/logging"
-	"github.com/pavelpascari/svcrt/telemetry"
 )
 
 func main() {
@@ -27,7 +27,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	log := logging.New(os.Stdout, logging.Options{Level: slog.LevelInfo}, telemetry.LogExtractor())
+	log := kit.NewLogger(os.Stdout, kit.LoggerOptions{
+		Logging: logging.Options{Level: slog.LevelInfo},
+	})
 	log.Info("starting",
 		"addr", cfg.Addr,
 		"admin_addr", cfg.AdminAddr,
