@@ -13,14 +13,14 @@ import (
 	"github.com/pavelpascari/svcrt/contract"
 	"github.com/pavelpascari/svcrt/httpserver"
 	"github.com/pavelpascari/svcrt/logging"
+	"github.com/pavelpascari/svcrt/testkit"
 )
 
-func newTestServer(t *testing.T) (http.Handler, func() string) {
+func newTestServer(t *testing.T) (http.Handler, *testkit.Records) {
 	t.Helper()
-	var buf bytes.Buffer
-	log := logging.New(&buf, logging.Options{Level: slog.LevelDebug})
+	log, logs := testkit.Logger(t)
 	svc := NewService(openStore(map[string]*Order{"1": {ID: "1", Qty: 3}}))
-	return newServer(svc, log), buf.String
+	return newServer(svc, log), logs
 }
 
 // --- the R0 acceptance test: config + logging + contract composed ---
@@ -106,8 +106,7 @@ func TestAcceptanceErrorBodyCarriesNoProse(t *testing.T) {
 	// contract.Coded. writeError is called directly, as
 	// TestWriteErrorUncodedIsA500WithoutLeakingTheCause does, so the same
 	// no-prose rule is proven for the 500 path too.
-	var buf bytes.Buffer
-	log := logging.New(&buf, logging.Options{Level: slog.LevelDebug})
+	log, _ := testkit.Logger(t)
 	rec := httptest.NewRecorder()
 	writeError(rec, log, opaqueError{})
 
@@ -180,15 +179,15 @@ func TestAcceptanceLogLineCarriesRouteAndStatus(t *testing.T) {
 	h, logs := newTestServer(t)
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/orders/1", nil))
 
-	var line map[string]any
-	if err := json.Unmarshal([]byte(strings.TrimSpace(logs())), &line); err != nil {
-		t.Fatalf("decode log %q: %v", logs(), err)
+	line, ok := logs.Last()
+	if !ok {
+		t.Fatal("the handler emitted no log line")
 	}
-	if line[httpserver.KeyRoute] != "GET /orders/{id}" {
-		t.Errorf("%s = %v, want the route pattern", httpserver.KeyRoute, line[httpserver.KeyRoute])
+	if line.Attrs[httpserver.KeyRoute] != "GET /orders/{id}" {
+		t.Errorf("%s = %v, want the route pattern", httpserver.KeyRoute, line.Attrs[httpserver.KeyRoute])
 	}
-	if line[httpserver.KeyStatus] != float64(200) {
-		t.Errorf("%s = %v, want 200", httpserver.KeyStatus, line[httpserver.KeyStatus])
+	if line.Attrs[httpserver.KeyStatus] != float64(200) {
+		t.Errorf("%s = %v, want 200", httpserver.KeyStatus, line.Attrs[httpserver.KeyStatus])
 	}
 }
 
@@ -357,16 +356,15 @@ func TestWriteErrorLogsTheErrorCodeUnderTheWellKnownKey(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		var buf bytes.Buffer
-		log := logging.New(&buf, logging.Options{Level: slog.LevelDebug})
+		log, logs := testkit.Logger(t)
 		writeError(httptest.NewRecorder(), log, tc.err)
 
-		line := map[string]any{}
-		if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &line); err != nil {
-			t.Fatalf("%s: decode log %q: %v", tc.name, buf.String(), err)
+		line, ok := logs.Last()
+		if !ok {
+			t.Fatalf("%s: writeError emitted no log line", tc.name)
 		}
-		if line[contract.KeyCode] != tc.wantCode {
-			t.Errorf("%s: %s = %v, want %q", tc.name, contract.KeyCode, line[contract.KeyCode], tc.wantCode)
+		if line.Attrs[contract.KeyCode] != tc.wantCode {
+			t.Errorf("%s: %s = %v, want %q", tc.name, contract.KeyCode, line.Attrs[contract.KeyCode], tc.wantCode)
 		}
 	}
 }
