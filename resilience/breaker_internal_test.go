@@ -528,3 +528,187 @@ func TestNoReachableStateIsHalfOpenWithoutAFullFailureCount(t *testing.T) {
 		t.Fatalf("only %d states reached; the search collapsed", len(seen))
 	}
 }
+
+// countingFailure returns a transport that always answers 500 and counts how
+// many requests actually reached it. The count is the assertion that matters
+// for the default-value tests below: "did this request get past the breaker"
+// is not the same question as "did it return an error".
+func countingFailure(calls *atomic.Int32) http.RoundTripper {
+	return roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return &http.Response{StatusCode: 500, Body: http.NoBody, Request: r}, nil
+	})
+}
+
+// TestTheDefaultFailureThresholdIsFiveConsecutiveFailures pins the documented
+// zero value BEHAVIOURALLY. TestDefaultsApply compares withDefaults' output
+// against defaultFailureThreshold, so it holds for any value of that constant
+// and cannot see it change; a caller who left FailureThreshold at zero gets
+// whatever the constant says, and 4 or 6 is a different contract from 5.
+func TestTheDefaultFailureThresholdIsFiveConsecutiveFailures(t *testing.T) {
+	clk := newClock()
+	var calls atomic.Int32
+	// Cooldown is set explicitly: this test is about the threshold, and a
+	// default it does not exercise should not be able to fail it.
+	rt := Breaker(BreakerPolicy{Cooldown: time.Minute, now: clk.now})(countingFailure(&calls))
+
+	for i := 1; i <= 5; i++ {
+		resp, err := rt.RoundTrip(newReq(t))
+		if err != nil {
+			t.Fatalf("failure %d was refused, so the default threshold is below 5: %v", i, err)
+		}
+		resp.Body.Close()
+	}
+	if _, err := rt.RoundTrip(newReq(t)); !errors.Is(err, ErrOpen) {
+		t.Fatalf("error = %v, want ErrOpen: five consecutive failures did not "+
+			"open a default-threshold breaker", err)
+	}
+	if got := calls.Load(); got != 5 {
+		t.Fatalf("upstream saw %d requests, want 5", got)
+	}
+}
+
+// TestTheDefaultCooldownIsThirtySeconds pins the other documented zero value,
+// and pins it at the boundary for the same reason Task 2 pinned the explicit
+// one: "roughly half a minute" is not a contract, and TestDefaultsApply is
+// blind to the constant's value.
+func TestTheDefaultCooldownIsThirtySeconds(t *testing.T) {
+	clk := newClock()
+	var calls atomic.Int32
+	rt := Breaker(BreakerPolicy{FailureThreshold: 1, now: clk.now})(countingFailure(&calls))
+
+	resp, err := rt.RoundTrip(newReq(t)) // trips
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	clk.advance(30*time.Second - time.Nanosecond)
+	if _, err := rt.RoundTrip(newReq(t)); !errors.Is(err, ErrOpen) {
+		t.Fatalf("a probe was admitted before 30s: err = %v, want ErrOpen", err)
+	}
+
+	clk.advance(time.Nanosecond)
+	resp, err = rt.RoundTrip(newReq(t))
+	if err != nil {
+		t.Fatalf("no probe at exactly 30s, so the default cooldown is longer: %v", err)
+	}
+	resp.Body.Close()
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream saw %d requests, want 2 (the trip and the probe)", got)
+	}
+}
+
+// TestACooldownOfOneNanosecondIsHonoured guards withDefaults' "0 means 30s"
+// rule at its own boundary. `if p.Cooldown <= 0` is the whole of that rule,
+// and widening it by one -- `<= 1` -- silently replaces a caller's explicit
+// 1ns with 30 seconds, i.e. an option that does nothing, which is the exact
+// defect class kit was built to avoid. One nanosecond is an odd thing to
+// configure; being quietly overruled when you do is not.
+func TestACooldownOfOneNanosecondIsHonoured(t *testing.T) {
+	clk := newClock()
+	var calls atomic.Int32
+	rt := Breaker(BreakerPolicy{FailureThreshold: 1, Cooldown: time.Nanosecond, now: clk.now})(
+		countingFailure(&calls))
+
+	resp, err := rt.RoundTrip(newReq(t)) // trips
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	clk.advance(time.Nanosecond)
+	resp, err = rt.RoundTrip(newReq(t))
+	if err != nil {
+		t.Fatalf("the 1ns cooldown was replaced by a default: %v", err)
+	}
+	resp.Body.Close()
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream saw %d requests, want 2 (the trip and the probe)", got)
+	}
+}
+
+// TestTheProbeSlotIsStillExclusiveAfterAPanickingProbe closes the one hole
+// TestAPanickingTransportDoesNotStrandTheProbe leaves open. That test proves
+// the released slot is re-claimable; it sends exactly one request afterwards,
+// so it cannot see whether the claim is EXCLUSIVE.
+//
+// Half-open-with-no-probe-outstanding is reachable only through a panicking
+// probe -- every returning transport passes through record, which leaves the
+// circuit open or closed, never half-open -- so `b.probing = true` in allow's
+// half-open branch is only ever load-bearing on this path. Delete it and the
+// suite stays green while the state the breaker exists to prevent (a burst at
+// an upstream that has just demonstrated it is unwell) is exactly what
+// happens after one panic.
+func TestTheProbeSlotIsStillExclusiveAfterAPanickingProbe(t *testing.T) {
+	clk := newClock()
+	var boom, blocking, parked atomic.Bool
+	var calls atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+
+	rt := Breaker(BreakerPolicy{FailureThreshold: 1, Cooldown: time.Minute, now: clk.now})(
+		roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			if boom.Load() {
+				panic("transport exploded")
+			}
+			calls.Add(1)
+			// Exactly one call parks, so a breaker that wrongly admits a
+			// second fails the assertion below rather than deadlocking on
+			// release or panicking on a double close.
+			if blocking.Load() && parked.CompareAndSwap(false, true) {
+				close(started)
+				<-release
+			}
+			return &http.Response{StatusCode: 500, Body: http.NoBody, Request: r}, nil
+		}))
+
+	resp, err := rt.RoundTrip(newReq(t)) // trips
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	// The probe panics, so record never runs: the circuit is left half-open
+	// with the probe slot released by the defer.
+	boom.Store(true)
+	clk.advance(time.Minute)
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("the transport panic did not propagate to the caller")
+			}
+		}()
+		_, _ = rt.RoundTrip(newReq(t))
+	}()
+
+	boom.Store(false)
+	blocking.Store(true)
+	calls.Store(0)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		resp, err := rt.RoundTrip(newReq(t)) // re-claims the slot and parks
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the released slot was never re-claimed after the panic")
+	}
+	// The clock has not advanced, so nothing but an unclaimed half-open slot
+	// can let this through.
+	if _, err := rt.RoundTrip(newReq(t)); !errors.Is(err, ErrOpen) {
+		t.Errorf("a second request during the re-claimed probe: err = %v, want ErrOpen", err)
+	}
+	close(release)
+	<-done
+
+	if got := calls.Load(); got != 1 {
+		t.Errorf("%d requests reached the upstream during the re-claimed probe, want 1", got)
+	}
+}

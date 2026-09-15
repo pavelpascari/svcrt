@@ -197,3 +197,68 @@ func TestEveryBreakerOptionLandsOnItsOwnDestination(t *testing.T) {
 		t.Error("BreakerPolicy.FailureThreshold did not reach the breaker")
 	}
 }
+
+// TestBreakerDoesNotTripBelowFiveHundred pins the 5xx boundary from the side
+// the 429 test cannot see. 429 is 71 short of the boundary, so a predicate
+// mutated to `>= 499` still lets it through -- and 499 is not hypothetical:
+// it is nginx's client-closed-request, recorded when the CALLER goes away.
+// Tripping on it opens the circuit because of cancellations on this side of
+// the wire, which is the opposite of what the breaker is for.
+func TestBreakerDoesNotTripBelowFiveHundred(t *testing.T) {
+	for _, code := range []int{http.StatusBadRequest, http.StatusNotFound, 499} {
+		rt := resilience.Breaker(resilience.BreakerPolicy{FailureThreshold: 1})(status(code))
+
+		for i := range 3 {
+			resp, err := rt.RoundTrip(get(t))
+			if err != nil {
+				t.Fatalf("status %d, request %d: tripped the breaker: %v", code, i, err)
+			}
+			resp.Body.Close()
+		}
+	}
+}
+
+// TestBreakerSuccessResetsTheCountToZeroExactly is the half
+// TestBreakerSuccessResetsTheCount cannot see. That test proves the count is
+// reset to something LOW enough that 2+2 failures around a success do not
+// trip a threshold of 3; it passes just as happily if the reset lands on -1,
+// which quietly costs every caller one extra failure before the circuit ever
+// opens again. So this one counts from the other side: after a success,
+// exactly FailureThreshold consecutive failures must open it.
+func TestBreakerSuccessResetsTheCountToZeroExactly(t *testing.T) {
+	var fail bool
+	rt := resilience.Breaker(resilience.BreakerPolicy{FailureThreshold: 3})(
+		rtFunc(func(r *http.Request) (*http.Response, error) {
+			code := http.StatusOK
+			if fail {
+				code = http.StatusInternalServerError
+			}
+			resp := respond(code)
+			resp.Request = r
+			return resp, nil
+		}))
+
+	// One failure, then a success: the count is back at zero, whatever it was.
+	for _, seq := range []bool{true, false} {
+		fail = seq
+		resp, err := rt.RoundTrip(get(t))
+		if err != nil {
+			t.Fatalf("unexpected error %v", err)
+		}
+		resp.Body.Close()
+	}
+
+	// Exactly three more failures must open it -- not four.
+	fail = true
+	for i := 1; i <= 3; i++ {
+		resp, err := rt.RoundTrip(get(t))
+		if err != nil {
+			t.Fatalf("failure %d after the success was refused early: %v", i, err)
+		}
+		resp.Body.Close()
+	}
+	if _, err := rt.RoundTrip(get(t)); !errors.Is(err, resilience.ErrOpen) {
+		t.Fatalf("error = %v, want ErrOpen: the success reset the count to "+
+			"something below zero, so the threshold now costs an extra failure", err)
+	}
+}
