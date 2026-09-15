@@ -113,10 +113,10 @@ existing one.
 A module that targets someone else's type *without* importing that type's
 package is a different case, not a fourth spelling: it must return the bare,
 unnamed func type instead of a same-shaped type of its own. `resilience` is
-the worked example. `Retry` and `Timeout` wrap `http.RoundTripper` —
-exactly `httpclient.Middleware`'s shape — but `resilience` depends on
-nothing outside the standard library, so it cannot import `httpclient` to
-name its return type `httpclient.Middleware`. Declaring
+the worked example. `Retry`, `Timeout` and `Breaker` wrap
+`http.RoundTripper` — exactly `httpclient.Middleware`'s shape — but
+`resilience` depends on nothing outside the standard library, so it cannot
+import `httpclient` to name its return type `httpclient.Middleware`. Declaring
 `type Middleware func(http.RoundTripper) http.RoundTripper` in `resilience`
 instead, for tidiness, would look harmless and would not compile through:
 `httpclient.Chain(resilience.Retry(p))` requires the argument to be
@@ -125,11 +125,12 @@ to another merely because their underlying types match — two named types
 with identical underlying types are still different types, full stop. An
 *unnamed* func type carries no such restriction: it is assignable to any
 named type sharing its underlying type, which is exactly the property
-`resilience` needs and a same-shaped named type would throw away. So `Retry`
-and `Timeout` return the bare `func(http.RoundTripper) http.RoundTripper`,
-never a named type of their own — and that is the general rule for this
-case: a module shipping middleware for a type it does not own returns the
-bare func type, precisely so neither module has to import the other.
+`resilience` needs and a same-shaped named type would throw away. So `Retry`,
+`Timeout` and `Breaker` return the bare
+`func(http.RoundTripper) http.RoundTripper`, never a named type of their own
+— and that is the general rule for this case: a module shipping middleware
+for a type it does not own returns the bare func type, precisely so neither
+module has to import the other.
 `httpserver.AccessLog` is the contrasting case, not an exception to it:
 it returns `httpserver.Middleware`, a *named* type, and that is fine
 precisely because `AccessLog` lives in `httpserver` itself — the same-package
