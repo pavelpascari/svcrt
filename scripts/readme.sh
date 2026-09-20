@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compile every complete Go program in README.md.
+# Compile every complete Go program in the reader-facing Markdown guides.
 #
 # The README's quickstart was broken for an unknown length of time: it named
 # lifecycle.Options (the type is lifecycle.Config), treated OnDrain as a struct
@@ -24,12 +24,17 @@ root=$(pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
+# Keep this list explicit: design records contain historical snippets and are
+# not consumer documentation. A new runtime guide belongs here so its complete
+# examples cannot drift independently from the README.
+documents=(README.md docs/runtime-guide.md)
+
 # Extract each fenced go block to its own file.
 awk -v dir="$work" '
   /^```go$/ { inb = 1; n++; next }
   /^```$/   { inb = 0; next }
   inb       { print > (dir "/block" n ".txt") }
-' README.md
+' "${documents[@]}"
 
 found=0
 for src in "$work"/block*.txt; do
@@ -49,15 +54,15 @@ for src in "$work"/block*.txt; do
         -replace="github.com/pavelpascari/svcrt/$m=$root/$m" )
   done
   ( cd "$mod" && GOWORK=off go mod tidy 2>"$work/tidy$found.err" ) ||
-    fail "README go block $found: 'go mod tidy' failed; the snippet imports something that does not resolve:
+    fail "documentation Go block $found: 'go mod tidy' failed; the snippet imports something that does not resolve:
 $(tail -5 "$work/tidy$found.err")"
   ( cd "$mod" && GOWORK=off go build ./... ) ||
-    fail "README go block $found does not compile. The README documents this tree, so a snippet that will not build is wrong about the API."
+    fail "documentation Go block $found does not compile. The guides document this tree, so a snippet that will not build is wrong about the API."
 done
 
 # A gate that silently checks nothing is worse than no gate. If the README
 # ever loses its complete example, say so rather than passing.
 [ "$found" -gt 0 ] ||
-  fail "README.md contains no complete Go program (a \`\`\`go block with a 'package' clause), so this check verified nothing"
+  fail "the documentation contains no complete Go program (a \`\`\`go block with a 'package' clause), so this check verified nothing"
 
-echo "README: $found complete Go block(s) compile"
+echo "documentation: $found complete Go block(s) compile"
