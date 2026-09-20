@@ -127,6 +127,25 @@ done
 grep -q '^go 1\.22$' contract/go.mod ||
   fail "contract/go.mod no longer declares 'go 1.22'; that floor is a deliberate compatibility commitment for the one module that freezes (spec §4). If raising it is intended, change it here too."
 
+# Every Example function must carry an "// Output:" (or "// Unordered output:")
+# comment.
+#
+# Without one, go test COMPILES the example and never RUNS it. The result sits
+# in a _test.go file, is counted by `go build`, appears in the docs, and
+# asserts nothing -- a gate that looks present and does not apply, which is the
+# failure mode this repo has found eight times (docs/conventions.md §12).
+#
+# Counted per file rather than repo-wide so the message names where to look,
+# and greps are anchored so an "// Output:" inside a string literal or a
+# comment about outputs cannot satisfy the check.
+for f in $(find . -name '*_test.go' -not -path './.git/*' | sort); do
+  fns=$(grep -c '^func Example' "$f" || true)
+  [ "$fns" -eq 0 ] && continue
+  outs=$(grep -cE '^[[:space:]]*// (Output|Unordered output):' "$f" || true)
+  [ "$fns" -eq "$outs" ] ||
+    fail "$f has $fns Example function(s) but $outs '// Output:' comment(s); an example without one is compiled and never run, so it asserts nothing"
+done
+
 # Exemplars depend on unpublished modules, so unlike the libraries they run
 # WITH the workspace -- this is the one place go.work is load-bearing.
 #

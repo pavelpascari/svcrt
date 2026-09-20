@@ -587,3 +587,99 @@ sells; `testkit`'s is that an assertion about a `contract` error has to name
 "It is only a test dependency" is likewise not an argument, and `testkit` is
 the reason the sentence is here: a `require` added by a `_test.go` file is a
 `require` like any other, counted by `go list -m all` and by the gate.
+
+## 12. What CI runs automatically, and what it deliberately does not
+
+Until R9 there was no `.github` directory. `scripts/ci.sh` had existed since
+R0 and had only ever run in a developer's shell, so "ci.sh exit 0" in nine
+milestone reports meant *exit 0 by hand, on a branch* — every merged PR
+carried zero automated verification. That is the gap this section records
+being closed, and it is worth recording because a gate nothing runs is
+indistinguishable, in a report, from a gate that passed.
+
+### Runs on every push to `main` and every pull request
+
+`.github/workflows/ci.yml` runs two things, in order:
+
+- **`./scripts/ci.sh`** — unchanged. It already did `gofmt -l` (tested for
+  empty output, not exit status), `go vet`, `go test -race` at the `-count`
+  this file's §5 assigns, the zero-dependency assertions in both directions
+  (§11), the sibling-import gate in both directions, `contract`'s
+  import-and-`go`-directive assertions, and the exemplar suites. It needed no
+  changes; it needed to be *run*.
+- **`./scripts/coverage.sh`** — the ratchet, below.
+
+The Go version comes from `go-version-file: kit/go.mod` rather than a literal
+in the workflow, so the toolchain is stated in one place and cannot drift out
+of step with the modules.
+
+`.github/workflows/compat.yml` builds and tests `contract` under a real Go
+1.22 toolchain with `GOWORK=off`. `ci.sh` enforces that commitment by grepping
+`contract/go.mod` for `go 1.22`, which verifies that we still *claim* it. The
+`go` directive gates syntax, not stdlib APIs: a module declaring `go 1.22` can
+call a Go 1.23 stdlib function and compile clean under a 1.25 toolchain. Only
+a real 1.22 toolchain catches a post-1.22 stdlib call added to `contract`,
+which is precisely the regression that commitment exists to prevent. Only
+`contract` gets this job, because it is the only module making the promise.
+
+### The coverage ratchet is a minimum, and its drift is printed, not failed
+
+`coverage-floors.txt` records one floor per module; `scripts/coverage.sh`
+derives the module list from `scripts/lib.sh` — `MODULES` and `EXEMPLARS`, the
+same lists `ci.sh` and `release.sh` read — rather than keeping a second copy.
+Four behaviours, and all four were demonstrated by breaking them:
+
+- **Below floor → FAIL**, naming the module. The regression case, which is the
+  whole point.
+- **Above floor → PASS**, and the gap is printed. Coverage improving must
+  never break a build.
+- **A module on disk with no entry → FAIL.** A new module silently ungated is
+  the failure §5's inverse assertion exists for, repeated.
+- **An entry naming no module on disk → FAIL.** A rename otherwise leaves the
+  gate matching nothing while CI still prints OK — the same lie a stale
+  `DEP_EXEMPT` entry tells (§11).
+
+The honest weakness, recorded rather than papered over: a floor left far below
+actual stops catching regressions above it. A module that slips from 100% to
+92% against a floor of 90% passes. Printing the gap on every run is the whole
+mitigation, and it relies on somebody reading it and raising the floor — which
+is a one-line edit to `coverage-floors.txt`. The alternative, failing a build
+because coverage improved, was considered and rejected.
+
+The floors are measured, never chosen. The ten library modules sit at 100%
+because §4 and the spec require it; the exemplars are services rather than
+libraries and carry the numbers they actually report.
+
+### Mutation testing stays out of CI, on purpose
+
+§9 and §10 describe mutation as a deliberate local act, and that does not
+change. A full no-arg `scripts/mutation.sh` run has never completed in one
+invocation, and per-module runs took minutes each during R7 and R8. A PR gate
+that times out gets disabled rather than fixed, and a disabled gate is worse
+than an absent one because it still appears in the list.
+
+The cost is real and is stated rather than hidden: **nothing prevents a
+mutation-score regression from merging.** The scores in
+`docs/mutation-survivors.md` are claims, true as of the run that produced
+them, re-checked only when somebody runs the script.
+
+The practice is load-bearing even though the gate is not automated. This repo
+has found **eight** assertions that could not fail, and this is the canonical
+tally — state it here and reference it elsewhere rather than repeating a
+number that drifts:
+
+| # | where | shape | found by |
+|---|---|---|---|
+| 1 | R3 | retry fixture returned 200 on attempt 1, so the loop never reached the code under test | mutation |
+| 2 | R3 | `io.NopCloser` inert to context cancellation | mutation |
+| 3 | R5 | client test with no ambient span, so `Inject` never fired | mutation |
+| 4 | R5 | no test read the response at all | mutation |
+| 5 | R7 | boundary assertion nested inside `if !errors.Is(err, ErrOpen)` — unreachable under the bug it tested for | mutation |
+| 6 | R9 | `if _, _ = get(t, url); false` — a guard that can never be true | **reading** |
+| 7 | R9 | `TestRecoverDoesNotWriteTwice` passed under deletion of the guard it existed for | mutation |
+| 8 | R9 | `TestRecoverRePanicsErrAbortHandler` passed under `errors.Is` → `==` | mutation |
+
+Seven of eight came from running a mutation; one from reading a plan before it
+was executed. Entries 7 and 8 are a distinct shape worth naming: the test
+written *for* a behaviour did not catch the mutation *of* that behaviour, and
+only a newly added test did. Coverage was 100% throughout in every case.
