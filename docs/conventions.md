@@ -661,7 +661,25 @@ than an absent one because it still appears in the list.
 The cost is real and is stated rather than hidden: **nothing prevents a
 mutation-score regression from merging.** The scores in
 `docs/mutation-survivors.md` are claims, true as of the run that produced
-them, re-checked only when somebody runs the script. The eight vacuous
-assertions this repo has found were all found that way — by running a
-mutation, never by reading — so the practice is load-bearing even though the
-gate is not automated.
+them, re-checked only when somebody runs the script.
+
+The practice is load-bearing even though the gate is not automated. This repo
+has found **eight** assertions that could not fail, and this is the canonical
+tally — state it here and reference it elsewhere rather than repeating a
+number that drifts:
+
+| # | where | shape | found by |
+|---|---|---|---|
+| 1 | R3 | retry fixture returned 200 on attempt 1, so the loop never reached the code under test | mutation |
+| 2 | R3 | `io.NopCloser` inert to context cancellation | mutation |
+| 3 | R5 | client test with no ambient span, so `Inject` never fired | mutation |
+| 4 | R5 | no test read the response at all | mutation |
+| 5 | R7 | boundary assertion nested inside `if !errors.Is(err, ErrOpen)` — unreachable under the bug it tested for | mutation |
+| 6 | R9 | `if _, _ = get(t, url); false` — a guard that can never be true | **reading** |
+| 7 | R9 | `TestRecoverDoesNotWriteTwice` passed under deletion of the guard it existed for | mutation |
+| 8 | R9 | `TestRecoverRePanicsErrAbortHandler` passed under `errors.Is` → `==` | mutation |
+
+Seven of eight came from running a mutation; one from reading a plan before it
+was executed. Entries 7 and 8 are a distinct shape worth naming: the test
+written *for* a behaviour did not catch the mutation *of* that behaviour, and
+only a newly added test did. Coverage was 100% throughout in every case.

@@ -22,8 +22,9 @@ automated verification.
 
 That is the most expensive gap in the repo and it is not a code gap. Everything
 this project has built to keep gates honest — two-way `DEP_EXEMPT`,
-`SIBLING_ALLOWED`, `COUNT_MODULES` with an inverse assertion, six vacuous tests
-found by mutation — sits behind a script nothing runs automatically.
+`SIBLING_ALLOWED`, `COUNT_MODULES` with an inverse assertion, the vacuous tests
+found by mutation (tallied in `docs/conventions.md` §12) — sits behind a script
+nothing runs automatically.
 
 ### 1.2 A second gate that looks present and does not apply
 
