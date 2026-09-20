@@ -1,0 +1,29 @@
+# Coverage floors, one line per module: "<module> <minimum statement coverage>".
+#
+# Read by scripts/coverage.sh. These are MINIMUMS, not targets and not
+# assertions of the current number. Above the floor passes and the gap is
+# printed; below it fails. Raising a floor after a genuine improvement is a
+# one-line change here, and it is the only thing that keeps the gap honest --
+# a floor left far below actual stops catching regressions above it, which is
+# this ratchet's accepted, printed weakness.
+#
+# Every module on disk must appear here and every name here must be a module
+# on disk: coverage.sh fails in both directions, because a missing entry is a
+# module nothing gates and a stale entry is a gate that quietly stopped
+# applying.
+#
+# Measured, not chosen. The library modules hold 100% by the standing rule
+# (docs/conventions.md, spec §8); the exemplars are services, not libraries,
+# and their floors are the numbers they actually report.
+config 100.0
+contract 100.0
+httpclient 100.0
+httpserver 100.0
+kit 100.0
+lifecycle 100.0
+logging 100.0
+resilience 100.0
+telemetry 100.0
+testkit 100.0
+examples/orders 89.7
+examples/worker 82.3

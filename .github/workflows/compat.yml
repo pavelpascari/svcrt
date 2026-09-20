@@ -1,0 +1,32 @@
+name: compat
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# contract declares `go 1.22` as a deliberate compatibility commitment: it is
+# the module intended to freeze at v1 and be imported by every generated
+# service. scripts/ci.sh enforces that by grepping for the string, which
+# verifies that we still CLAIM it. This builds it.
+#
+# The `go` directive alone does not gate stdlib APIs -- a module declaring
+# `go 1.22` can call a Go 1.23 stdlib function and compile clean under a newer
+# toolchain. Only a real 1.22 toolchain catches that, which is the regression
+# this commitment exists to prevent.
+jobs:
+  contract-go122:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: build and test contract on its declared floor
+        working-directory: contract
+        env:
+          GOWORK: off
+        run: |
+          go build ./...
+          go test ./...

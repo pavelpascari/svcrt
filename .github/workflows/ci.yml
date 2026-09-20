@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    # ci.sh runs -race -count=10 across four concurrent modules and takes
+    # minutes. Generous enough not to flake, tight enough to notice a hang.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # Points at a module declaring the current toolchain, so the version
+          # is not duplicated into the workflow where it would drift.
+          go-version-file: kit/go.mod
+          cache: true
+      - name: gates
+        run: ./scripts/ci.sh
+      - name: coverage ratchet
+        run: ./scripts/coverage.sh
