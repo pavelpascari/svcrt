@@ -3,7 +3,8 @@
 //
 // It is for CONSUMERS of svcrt. svcrt's own core modules cannot use it: a
 // test-only dependency still lands in go.mod, and those modules are gated at
-// zero requires so that adopting one costs nothing. See the R8 design doc S2.
+// zero requires so that adopting one costs nothing. A core module that
+// imported testkit for its tests would fail that gate.
 //
 // Nothing here imports testing. TB below is satisfied by *testing.T, and
 // importing testing from a non-test package would register test flags in any

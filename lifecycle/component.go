@@ -14,9 +14,6 @@ import (
 	"time"
 )
 
-// Ref, Option, After, and StopTimeout are declared in lifecycle.go (Task 2),
-// because Ref carries a *Lifecycle and that type does not exist yet.
-
 // StartFunc returns when the component is ready, or returns an error.
 //
 // It must honour ctx cancellation while starting, and on returning an error it

@@ -6,8 +6,10 @@ import (
 	"github.com/pavelpascari/svcrt/config"
 )
 
-// AppConfig exercises every config feature the module offers, because this
-// example is the acceptance gate for R0 as well as a sample.
+// AppConfig exercises most of what svcrt/config offers -- a default, a
+// required field, a tri-state pointer, a prefixed nested struct, an optional
+// nested block, a Secret and a duration -- so this type doubles as a worked
+// reference for the config module as well as this service's configuration.
 type AppConfig struct {
 	// Optional: a default makes it so.
 	Addr string `env:"ADDR" default:":8080"`

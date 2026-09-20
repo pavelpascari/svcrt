@@ -14,11 +14,11 @@ import (
 // statusFor maps an error code to an HTTP status.
 //
 // EVERYTHING BELOW THIS COMMENT IS TEMPORARY. This table, the decode of the
-// path parameter, the envelope construction, and writeError are exactly what
-// svcgen emits at G0/G1 from a svcgen:status directive on each code. It is
-// hand-written here so the runtime APIs have a real caller before the
-// generator exists -- and so the boilerplate G1 deletes is visible and
-// annoying rather than hypothetical.
+// path parameter, the envelope construction, and writeError are the
+// boilerplate the svcgen generator is meant to emit from a status directive
+// on each error code. It is hand-written here so the runtime APIs have a real
+// caller before the generator exists -- and so the boilerplate that will be
+// deleted is visible and annoying rather than hypothetical.
 func statusFor(code string) int {
 	switch code {
 	case "order_not_found":
@@ -100,13 +100,17 @@ func newServer(svc *Service, log *slog.Logger) http.Handler {
 
 	// telemetry.Server goes OUTSIDE AccessLog: the access-log line is emitted
 	// by the handler AccessLog wraps, so the span must already be in context
-	// by the time that line is written. Inverting this order was verified (by
-	// hand, not committed) to break TestAcceptanceLogLineCarriesRouteAndStatus
-	// below -- telemetry.Server rebinds the request via r.WithContext, so
-	// AccessLog's closure over the pre-rebind *http.Request never observes
-	// the route ServeMux sets on r.Pattern once telemetry.Server sits
-	// outside it. See also TestAccessLogLosesTheTraceIDWhenTelemetryIsInnermost
-	// in telemetry_test.go, which pins the trace-id side of the same ordering.
+	// by the time that line is written.
+	//
+	// Inverting the two costs the route as well as the trace id.
+	// telemetry.Server rebinds the request via r.WithContext, and ServeMux
+	// records the matched pattern on whichever request instance it is handed
+	// -- the rebound one. An AccessLog sitting outside still closes over the
+	// original *http.Request, whose Pattern is never set, so the line is
+	// emitted with neither route nor trace_id and nothing errors.
+	// TestAcceptanceLogLineCarriesRouteAndStatus pins the route side;
+	// TestAccessLogLosesTheTraceIDWhenTelemetryIsInnermost in
+	// telemetry_test.go pins the trace-id side.
 	return httpserver.Chain(
 		telemetry.Server(telemetry.Options{}),
 		httpserver.AccessLog(log),

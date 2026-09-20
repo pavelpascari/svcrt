@@ -63,9 +63,9 @@ type Options struct {
 	// you know no response body is long-lived.
 	//
 	// Unlike every other field above, a non-positive value here is NOT
-	// clamped: zero deliberately means "no blanket timeout" (spec 3.3), and a
-	// negative value is passed through to http.Client.Timeout unchanged for
-	// the same reason -- there is no default to fall back to.
+	// clamped: zero deliberately means "no blanket timeout", and a negative
+	// value is passed through to http.Client.Timeout unchanged for the same
+	// reason -- there is no default to fall back to.
 	Timeout time.Duration
 
 	// TLSClientConfig is handed to the transport as-is. It exists because
@@ -88,8 +88,9 @@ type Options struct {
 // New never reads, copies from, or mutates http.DefaultTransport, and never
 // returns http.DefaultClient. Those are process-wide singletons: tuning them
 // re-tunes every other user in the process, and using them inherits whatever
-// someone else did. This is the client-side form of the net/http/pprof rule in
-// docs/conventions.md 7.
+// someone else did. It is the client-side form of the rule that keeps
+// net/http/pprof out of svcrt/httpserver -- a library must not reconfigure
+// state its callers share with everything else in the binary.
 //
 // The client owns no lifecycle, so there is nothing to close. To release idle
 // connections at shutdown, register c.CloseIdleConnections with your
@@ -142,7 +143,7 @@ func New(opts Options) *http.Client {
 // in the Transport literal they were reachable from no test at all: the
 // closure is only observable by dialing, and Options.DialTimeout could be
 // unwired entirely -- or crossed with the keep-alive interval -- with the
-// whole suite still green. Found at the R2 review.
+// whole suite still green.
 func newDialer(opts Options) *net.Dialer {
 	return &net.Dialer{
 		Timeout:   orDuration(opts.DialTimeout, defaultDialTimeout),

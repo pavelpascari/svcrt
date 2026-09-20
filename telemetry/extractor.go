@@ -16,7 +16,7 @@ import (
 // Extractor because this module does not import svcrt/logging -- and could not
 // use the named type even if it did: Go permits assignment between a named and
 // an unnamed type with the same underlying type, but not between two different
-// named types. See conventions.md S2.
+// named types.
 //
 // With no arguments it emits trace_id and span_id only. Baggage arrives from
 // an untrusted upstream, so members are opted into by name rather than
