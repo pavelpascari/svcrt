@@ -15,7 +15,7 @@ never owns your process — you write `main()`.
 | `config` | Decodes environment variables into a struct once, at construction, reporting every violation at once. |
 | `logging` | A `slog.Handler` that enriches records from their context. Defines no attribute keys of its own — each key belongs to whichever module emits it. |
 | `lifecycle` | Starts components in dependency order, stops them in reverse, and drains before it stops. Owns no signals — you pass it a context. |
-| `httpserver` | An `http.Server` with timeout defaults that are hard to get wrong, the three Kubernetes health gates, an admin mux, and an `AccessLog` middleware that logs one line per request. |
+| `httpserver` | An `http.Server` with timeout defaults that are hard to get wrong, the three Kubernetes health gates, an admin mux, an `AccessLog` middleware that logs one line per request, and a `Recover` middleware that turns a panicking handler into a bare 500 and a logged stack — composed *innermost*, so the access line and the span both see the 500. |
 | `httpclient` | An `http.Client` with connection-pool and timeout defaults that are hard to get wrong, and a `RoundTripper` middleware seam mirroring `httpserver`'s. |
 | `resilience` | Retry with backoff, per-attempt timeouts, and a circuit breaker, as `RoundTripper` middleware. Refuses to retry what it cannot safely replay, and stops calling a dependency that is plainly dead. |
 | `telemetry` | OpenTelemetry tracing and metrics for HTTP servers and clients, plus the log extractor that correlates them. The only module with external dependencies, and the API only — never the SDK. |
@@ -75,9 +75,17 @@ cd resilience && go test ./... -run Example -v
 
 ```sh
 ./scripts/ci.sh                        # test every module in isolation
+./scripts/coverage.sh                  # coverage ratchet against coverage-floors.txt
 ./scripts/mutation.sh                  # mutation gate, every module
 ./scripts/release.sh contract v0.1.0   # tag one module
 ```
+
+`ci.sh` and `coverage.sh` run on every push and pull request
+(`.github/workflows/ci.yml`), and `contract` is additionally built and tested
+on a real Go 1.22 toolchain (`.github/workflows/compat.yml`) — the `go`
+directive gates syntax, not stdlib APIs, so only an old toolchain can hold
+that compatibility promise honest. `mutation.sh` deliberately does **not** run
+in CI; `docs/conventions.md` §12 records why, and what that costs.
 
 `docs/conventions.md` records the decisions R0 made by doing rather than by
 writing down — option shapes, what `Middleware` means, when to delete a clause
