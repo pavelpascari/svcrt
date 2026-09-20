@@ -127,6 +127,12 @@ done
 grep -q '^go 1\.22$' contract/go.mod ||
   fail "contract/go.mod no longer declares 'go 1.22'; that floor is a deliberate compatibility commitment for the one module that freezes (spec §4). If raising it is intended, change it here too."
 
+# The README's Go programs must compile against this tree.
+#
+# Delegated to its own script because it builds throwaway modules; run it
+# directly with ./scripts/readme.sh while editing the README.
+./scripts/readme.sh || fail "README go blocks"
+
 # No tracked file may be an executable.
 #
 # R5 committed a 10MB Mach-O binary at the repo root and it survived coverage,
