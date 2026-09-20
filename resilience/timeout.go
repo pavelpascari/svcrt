@@ -11,8 +11,13 @@ import (
 //
 // Compose it with Retry to say which you mean:
 //
-//	Chain(Retry(p), Timeout(d))  // d bounds EACH attempt
-//	Chain(Timeout(d), Retry(p))  // d bounds the whole retry sequence
+//	httpclient.Chain(Retry(p), Timeout(d))  // d bounds EACH attempt
+//	httpclient.Chain(Timeout(d), Retry(p))  // d bounds the whole retry sequence
+//
+// The Chain is qualified because this package does not export one: resilience
+// has no dependencies and cannot name httpclient.Middleware, so the folding is
+// the caller's. An unqualified Chain here read as resilience.Chain, which does
+// not exist.
 //
 // That is why this is middleware rather than a Policy field: a field could
 // express only one of the two.
