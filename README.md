@@ -24,7 +24,9 @@ and `docs/conventions.md` §11 argues each one.
 - **Looking for a complete application?** [`examples/orders`](examples/orders)
   is an HTTP API with an upstream dependency;
   [`examples/worker`](examples/worker) is a background process with probes but
-  no application listener.
+  no application listener; and
+  [`examples/notifications`](examples/notifications) combines an API and an
+  asynchronous worker with a queue, provider retries and trace propagation.
 - **Looking up one API?** The [module table](#modules) points to each package's
   main entry point. Every package also ships executable examples visible in
   `go doc` and on pkg.go.dev.
@@ -160,7 +162,9 @@ so it does not grow a distinct value per order id.
 
 See `examples/orders` for a service with an upstream client, a circuit breaker
 and a dependency-ordered store, and `examples/worker` for a background process
-with no application HTTP surface.
+with no application HTTP surface. `examples/notifications` is the advanced
+composition: an API hands traced work to a queue, a lifecycle-managed worker
+retries an idempotent provider call, and shutdown drains accepted work.
 
 The [runtime guide](docs/runtime-guide.md) builds on this example with focused,
 copyable recipes for adding dependencies, outbound clients, readiness checks,
@@ -289,7 +293,7 @@ depend on; CI detects that from disk and runs those with the workspace instead.
 
 All ten modules are implemented and tested: `contract`, `config`, `logging`,
 `lifecycle`, `httpserver`, `httpclient`, `resilience`, `telemetry`, `kit` and
-`testkit`, plus the `httpserver/pprof` subpackage and two runnable exemplars
+`testkit`, plus the `httpserver/pprof` subpackage and three runnable exemplars
 under `examples/`.
 
 **Nothing is tagged yet.** `git tag` is empty, which is why `kit`, `testkit`

@@ -427,6 +427,9 @@ testkit.AssertParams(t, err, map[string]any{"id": "ord_1"})
   upstream client, breaker, telemetry, two listeners and ordered shutdown.
 - [`examples/worker`](../examples/worker) — background consumer with lifecycle
   and health probes, but no application HTTP server.
+- [`examples/notifications`](../examples/notifications) — HTTP ingestion plus
+  an asynchronous worker, with retry, circuit breaking, trace propagation
+  across a queue and graceful draining of accepted work.
 - Package `example_test.go` files — focused examples executed by `go test`, so
   their output and API usage cannot silently drift.
 
