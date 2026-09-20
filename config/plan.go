@@ -72,8 +72,8 @@ type walker struct {
 	// that never boots, which is the opposite of this module's contract.
 	//
 	// It is a path stack rather than a set of every type ever seen, because
-	// reusing one config fragment at two different prefixes is the documented
-	// way to share a fragment (§5.4) and must keep working.
+	// reusing one config fragment at two different prefixes -- the supported
+	// way to share a fragment -- must keep working.
 	active []reflect.Type
 }
 

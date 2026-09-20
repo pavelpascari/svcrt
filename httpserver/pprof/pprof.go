@@ -5,10 +5,10 @@
 // Importing this package also imports net/http/pprof, whose init() registers
 // the profiling handlers on http.DefaultServeMux. That happens on any import,
 // blank or not, and cannot be prevented. It is inert unless something serves
-// DefaultServeMux — which svclint's defaults pass already bans — but it is the
-// reason this lives in its own package rather than in svcrt/httpserver: a
-// consumer of httpserver must not silently acquire pprof endpoints on a mux it
-// did not ask about.
+// DefaultServeMux — nothing in svcrt ever does, and a service should build its
+// own mux — but it is the reason this lives in its own package rather than in
+// svcrt/httpserver: a consumer of httpserver must not silently acquire pprof
+// endpoints on a mux it did not ask about.
 //
 // Mount it only on an admin port that is not publicly routable. Profiling
 // endpoints expose heap dumps and goroutine traces.

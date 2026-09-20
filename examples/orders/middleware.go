@@ -7,9 +7,9 @@ import (
 )
 
 // The typed middleware in this file exists to put pressure on
-// contract.Middleware before it freezes. It is the only R0 consumer of the
-// generic seam, since generated code -- its real consumer -- does not exist
-// until G0.
+// contract.Middleware before its shape is frozen at v1. Generated code is the
+// seam's intended consumer and does not exist yet, so these hand-written
+// implementations are the only thing exercising it.
 //
 // Note what is NOT here: logging, tracing, and request IDs. Those need
 // nothing from the decoded request, so they belong at transport level as

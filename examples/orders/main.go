@@ -1,9 +1,16 @@
-// Command orders is the svcrt R1 exemplar: a complete service composed from
-// contract, config, logging, lifecycle, and httpserver with nothing else.
+// Command orders is a complete svcrt service: an HTTP API, an admin listener
+// answering the Kubernetes probes, a circuit-broken client to an upstream, and
+// an ordered startup and drain -- composed from config, contract, logging,
+// lifecycle, httpserver, kit and telemetry, and nothing else.
 //
-// It is deliberately assembled by hand. Every runtime API it touches must be
-// pleasant to call from generated code, not just from a human -- that is what
-// this file exists to check before the generator is written.
+// Read it as the worked example of the wiring the README summarises. main()
+// here does only what a service's main() must do: load config, build the
+// stack, install a signal handler, run. Everything else lives in stack.go and
+// server.go, which the acceptance tests call directly.
+//
+// It is deliberately assembled by hand rather than generated. Every runtime
+// API it touches has to be pleasant to call from generated code as well as by
+// a person, and hand-writing the call sites is how that gets checked.
 package main
 
 import (

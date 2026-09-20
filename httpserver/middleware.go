@@ -4,10 +4,11 @@ import "net/http"
 
 // Middleware wraps an http.Handler.
 //
-// Note the deliberate spelling difference across this project, recorded in
-// docs/conventions.md: contract.Middleware is a generic call-level type,
+// svcrt spells Middleware three ways on purpose, one per seam:
+// contract.Middleware is a generic call-level type over a decoded request,
 // httpserver.Middleware (this one) wraps an http.Handler, and
-// httpclient.Middleware wraps an http.RoundTripper.
+// httpclient.Middleware wraps an http.RoundTripper. They are different types,
+// not interchangeable ones.
 type Middleware func(http.Handler) http.Handler
 
 // Chain folds ms into one Middleware. The first argument ends up outermost,

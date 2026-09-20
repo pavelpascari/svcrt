@@ -22,7 +22,10 @@ func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { r
 //
 // The return type is the bare func type rather than a named one declared here,
 // so the result is assignable to svcrt/httpclient.Middleware without this
-// module importing it. See conventions.md S2.
+// module importing it. Go assigns an unnamed func type to any named type with
+// the same underlying type, but never one named type to another -- so a
+// telemetry.Middleware declared here for tidiness would compile and then
+// refuse to go into httpclient.Chain.
 //
 // Compose it INSIDE svcrt/resilience.Retry, which gives one span per attempt:
 // a retried call then shows three spans and the two that failed are visible.

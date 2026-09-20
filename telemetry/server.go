@@ -61,11 +61,10 @@ func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 // on http.ServeMux without complaint, and net/http parses it exactly as the
 // method-less "/x" because the text before the first space is empty. The
 // sentence above ("either of which contains a '/' before any space could
-// occur") is false for precisely that input, which is the hole a mutation
-// survivor found at R5: with i == 0, pattern[:0] is "" and the Contains test
-// answers "no slash, so this is a method", naming the span " /x" and losing
-// the method a method-less route is supposed to gain. An empty method
-// component is an ABSENT method, so i == 0 returns false with i < 0.
+// occur") is false for precisely that input. With i == 0, pattern[:0] is ""
+// and the Contains test answers "no slash, so this is a method" -- naming the
+// span " /x" and losing the method a method-less route is supposed to gain.
+// An empty method component is an ABSENT method, so i == 0 returns false.
 func routeHasMethodPrefix(pattern string) bool {
 	i := strings.IndexByte(pattern, ' ')
 	if i <= 0 {
@@ -79,7 +78,10 @@ func routeHasMethodPrefix(pattern string) bool {
 //
 // The return type is the bare func type rather than a named one declared here,
 // so the result is assignable to svcrt/httpserver.Middleware without this
-// module importing it. See conventions.md S2.
+// module importing it. Go assigns an unnamed func type to any named type with
+// the same underlying type, but never one named type to another -- so a
+// telemetry.Middleware declared here for tidiness would compile and then
+// refuse to go into httpserver.Chain.
 //
 // Compose it OUTSIDE svcrt/httpserver.AccessLog. The access-log line is
 // emitted by the handler AccessLog wraps, so the span has to already be in the
@@ -89,8 +91,9 @@ func routeHasMethodPrefix(pattern string) bool {
 // the request to the span context, and ServeMux records the matched pattern on
 // whichever request instance it is handed -- the rebound one. An AccessLog
 // sitting outside still closes over the ORIGINAL request, whose Pattern is
-// therefore never set, so the line loses its route as well. The exemplar's
-// TestAcceptanceLogLineCarriesRouteAndStatus is what catches the inversion.
+// therefore never set, so the line loses its route as well.
+// TestAcceptanceLogLineCarriesRouteAndStatus in examples/orders catches the
+// inversion.
 func Server(o Options) func(http.Handler) http.Handler {
 	prop := o.propagator()
 	tracer := o.tracer()

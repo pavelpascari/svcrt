@@ -2,11 +2,15 @@
 // code depends on. It imports only "context" and never anything else, so a
 // generated service's non-stdlib dependency footprint is this package alone.
 //
-// The API surface is deliberately tiny, and the intent is to freeze it at
-// v1. That freeze has NOT been decided: the design spec leaves it open
-// (§10, D3), R0 ships contract unfrozen, and examples/orders' hand-written
-// middleware exists to generate the evidence the decision needs. Until it is
-// settled, treat every addition as a design review.
+// The API surface is deliberately tiny, and the intent is to freeze it at v1.
+// That freeze has not happened yet: contract is not tagged v1, and the
+// hand-written middleware in examples/orders exists to put the generic seam
+// under real use before its shape becomes permanent.
+//
+// Until the freeze is decided, treat every addition as a design review. What
+// goes in now is what a frozen v1 would have to carry forever: removing an
+// exported name after v1 is a major version bump on contract and on every
+// module that names one of its types.
 package contract
 
 // KeyCode is the well-known log attribute key for a Coded error's code.
