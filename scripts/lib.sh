@@ -40,6 +40,7 @@ done
 # "someone decided" become indistinguishable.
 SIBLING_ALLOWED=(
   "kit=composes httpclient, resilience, telemetry and logging into the orderings R5 proved fail silently when inverted; a composition module cannot compose without importing what it composes. It is opt-in and nothing imports it, so the coupling is paid only by callers who asked for it"
+  "testkit=ships test helpers for CONSUMERS of svcrt, and cannot assert on a contract error or capture a logging record without importing contract and logging. It is opt-in, nothing in svcrt imports it, and no core module may -- a test-only require is still a require, so a core module adopting testkit would fail the zero-requires gate above (conventions.md §11)"
 )
 
 # The greps are deliberately greppable themselves -- one regex, listed here,
@@ -68,9 +69,10 @@ for m in "${MODULES[@]}"; do
   done
   $allowed || svcrt_fail "$m requires a sibling svcrt module:
 $reqs
-No core module imports another (conventions.md §11), and kit is the only
-module permitted to, because composition is its entire job. If $m genuinely
-must, that is a design change and needs the argument written down in
+No core module imports another (conventions.md §11). Only kit and testkit may,
+and each earned it: composition is kit's entire job, and testkit cannot assert
+on a contract error or capture a logging record without those two. If $m
+genuinely must, that is a design change and needs the argument written down in
 conventions.md §11 plus an entry in SIBLING_ALLOWED in scripts/lib.sh."
 done
 
@@ -190,7 +192,16 @@ done
 # exists only between them -- Retry replaying a request the span middleware
 # still holds -- is visible nowhere else. The composition is the artifact, so
 # the composition gets the gate. It costs about two seconds.
-COUNT_MODULES=(lifecycle httpserver resilience telemetry kit)
+#
+# testkit joined at R8, and is the first module the inverse heuristic below
+# would have caught on its own: Records and Server both hold mutex-guarded
+# state, so `sync.` matches its non-test source and CI demands either this
+# membership or a COUNT_EXEMPT entry. It belongs here on the merits anyway.
+# Records is written by whichever goroutine logged and read by the test
+# goroutine; Server.n is written by handler goroutines and read by the test.
+# A test helper that races is worse than a racing library, because the flake
+# it produces is attributed to the code under test.
+COUNT_MODULES=(lifecycle httpserver resilience telemetry kit testkit)
 
 # A module that looks concurrent by the heuristic below but is deliberately
 # NOT in COUNT_MODULES, as "<module>=<why>". Empty is the healthy state.

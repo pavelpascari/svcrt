@@ -221,10 +221,10 @@ every existing test gave the racing call a 20ms head start, so the race never
 fired under either gate. `-count=10` (with `-race`) is the check that would
 have caught it; a single green run says almost nothing about a module whose
 bugs are "hangs one run in fifty," not "returns the wrong value." `lifecycle`,
-`httpserver`, `resilience`, `telemetry` and `kit` run this way; the other
-library modules stay at `-count=1`.
+`httpserver`, `resilience`, `telemetry`, `kit` and `testkit` run this way; the
+other library modules stay at `-count=1`.
 
-Two of those five are there by judgement rather than by the heuristic below,
+Two of those six are there by judgement rather than by the heuristic below,
 and both would have been silently absent if the heuristic were the whole gate.
 `telemetry` (R5) matches none of the grepped constructs, yet its middleware
 closures capture one histogram and one tracer shared by every concurrent
@@ -235,6 +235,16 @@ place the composed chain runs as a whole — `resilience` and `telemetry` each
 get their ten runs unwired, so a race that exists only between them is visible
 nowhere else. The composition is the artifact, so the composition gets the
 gate.
+
+`testkit` (R8) is the first entry the inverse heuristic below would have
+caught unaided: `Records` and `Server` are both mutex-guarded, so `sync.`
+matches its non-test source and CI demands either membership or a
+`COUNT_EXEMPT` entry. It belongs on the merits regardless — `Records` is
+written by whichever goroutine logged and read by the test goroutine, and
+`Server`'s request counter is written by handler goroutines and read by the
+test. A test helper that races is worse than a racing library, because the
+flake it produces is attributed to the code under test rather than to the
+helper.
 
 The list lives in `scripts/lib.sh` (`COUNT_MODULES`) and is **asserted against
 the modules on disk, in both directions**. It has to be hand-kept -- it is a
@@ -366,7 +376,7 @@ and a reviewer can accept one while questioning the other. Squashed together
 they read as a single confident step, which is the shape least likely to get
 the survivor argument actually checked.
 
-## 11. Core modules have zero dependencies; there are two exceptions, and they are not the same kind
+## 11. Core modules have zero dependencies; there are three exceptions, and they are not the same kind
 
 `contract`, `config`, `logging`, `lifecycle`, `httpserver`, `httpclient` and
 `resilience` have **zero `require` directives**. A service can adopt any one of
@@ -374,8 +384,8 @@ them without inheriting anything. This had never been written down — five
 milestones enforced it by habit, and `grep` finds no section stating it —
 which was survivable only while no module ever wanted an exception.
 
-There are now two exceptions, and reading them as a pair of equivalents would
-lose the thing that matters about the second:
+There are now three exceptions, and reading them as a set of equivalents would
+lose what matters about the second and the third:
 
 - **`telemetry` takes an external dependency** — the OpenTelemetry API. It
   pulls something into a service from outside the repo.
@@ -383,6 +393,10 @@ lose the thing that matters about the second:
   to do so. It pulls nothing in from outside that its siblings do not already
   carry; what it introduces is an edge *between* svcrt modules, where there
   had been none.
+- **`testkit` takes sibling dependencies too, but for testing** — `contract`
+  and `logging` — and carries a limitation neither of the others has: **no
+  core module may use it.** That is not an oversight, and it is the first
+  question a reader has, so it is answered in full below.
 
 The second is a bigger change than the first, because the property at risk is
 different. An external dependency is a cost you can read off a `go.mod`. A
@@ -440,6 +454,54 @@ as the zero-requires rule was before R5. R6 introduced the first deliberate
 violation, which is the moment to gate it rather than the moment to stop
 caring: a core module that starts requiring a sibling now fails CI by name.
 
+### `testkit`, and why svcrt's own core modules may not use it
+
+`testkit` is the third exception and the second sibling importer. It requires
+`contract` and `logging`, and nothing else. A helper that asserts on a
+`contract.Coded` error cannot do it without `contract`; a helper that captures
+log records cannot do it without `logging`. The argument has the same shape as
+`kit`'s — a module whose entire job requires the dependency takes the cost,
+opt-in, so nobody else pays.
+
+**The limitation, stated plainly: a core module may not adopt `testkit`, not
+even in a `_test.go` file.** Go permits it — an external test package
+(`package logging_test`) breaks the import cycle, and a two-module experiment
+confirms it builds and tests cleanly. The bar it fails is not the compiler's,
+it is this section's: **a test-only dependency is still a `require`.**
+`go list -m all` then returns 2 lines for that module, and the zero-requires
+gate in `ci.sh` fails it by name. Letting the core modules use `testkit` means
+exempting all seven, which does not bend the zero-dependency invariant so much
+as delete it.
+
+The cost of that decision is visible and was measured before it was taken.
+Six modules in this repo hand-roll log capture; only `kit` and
+`examples/orders` — the two that already import siblings — can adopt
+`testkit`, so five keep their hand-rolled helpers forever. That duplication is
+the price of "adopting a core module costs you nothing", and it is the right
+way round: the duplication is paid once, by this repo, by people who can see
+it; the alternative is paid by every service that ever imports `logging`.
+
+**`testkit` is for consumers of svcrt.** `kit` and `examples/orders` are the
+only in-repo evidence it works at all, which is why their migration was the
+acceptance test for R8 rather than a tidy-up — a `testkit` nothing consumes is
+a guess about what consumers want.
+
+Two consequences of that audience shape the package:
+
+- **`testkit` never imports `testing`.** Its `TB` is a four-method interface
+  of its own, satisfied by `*testing.T` and `*testing.B`. Importing `testing`
+  from a non-test package registers test flags in any consumer that references
+  it, and `net/http/httptest` sets the precedent. It is also what makes the
+  package testable: `testing.TB` carries an unexported `private()` method
+  specifically to prevent outside implementations, so a fake of it cannot be
+  written — and an assertion that cannot be shown to fail is worse than no
+  assertion.
+- **`testkit` never imports `telemetry`.** `Logger` forwards
+  `...logging.Extractor` so a consumer supplies `telemetry.LogExtractor()`
+  themselves. A `testkit` that offered a trace-id assertion directly would make
+  every consumer pull the OTel module graph to assert on a log line — §2's
+  unnamed-func-type rule, applied one module further out.
+
 ### How it is enforced
 
 Not by this section. `scripts/ci.sh` asserts it per module, and it asserts
@@ -465,14 +527,16 @@ The sibling rule is asserted in `scripts/lib.sh`, both directions, against the
 
 - A module whose `go.mod` requires **any** `github.com/pavelpascari/svcrt/*`
   must be named in `SIBLING_ALLOWED` — shaped `<module>=<why>`, same as the
-  lists above and for the same reason. Today that is `kit` and nothing else.
+  lists above and for the same reason. Today that is `kit` and `testkit`, and
+  nothing else.
 - An entry in `SIBLING_ALLOWED` must name a module on disk, carry a reason,
   and name a module that actually requires a sibling. A permission for a
   module that requires none is the same lie a stale `DEP_EXEMPT` entry tells.
 
-One consequence is worth knowing, because it changes how CI runs. `kit`
-requires its siblings at `v0.0.0`, a version that resolves to nothing while
-this repo is untagged, so `kit` **cannot be built under `GOWORK=off`** — and
+One consequence is worth knowing, because it changes how CI runs. `kit` and
+`testkit` require their siblings at `v0.0.0`, a version that resolves to
+nothing while this repo is untagged, so they **cannot be built under
+`GOWORK=off`** — and
 `GOWORK=off` is how `ci.sh` proves every other module stands alone. That gate
 encodes an invariant `kit` exists to violate: `kit` is not useful without other
 svcrt modules present. So `ci.sh` derives the bucket from disk — a module
@@ -504,9 +568,9 @@ to tag `telemetry` forever. Nothing caught that, because no module has been
 tagged yet, so the bug had no way to surface until the first person tried to
 cut a `telemetry` release. Both scripts now read one list.
 
-### Adding a third exception
+### Adding a fourth exception
 
-A design change, not a judgement call. It needs the same argument the two
+A design change, not a judgement call. It needs the same argument the three
 above got, written down here, plus its `DEP_EXEMPT` or `SIBLING_ALLOWED`
 entry. "It only pulls in one small library" is not that argument: the cost is
 paid by every service that adopts the module, and they are not in the room.
@@ -517,4 +581,9 @@ so neither module imports the other. `telemetry.LogExtractor` and
 `resilience.Retry` both cross module boundaries that way with zero requires
 between them. A new sibling import needs to say why that is not available to
 it — `kit`'s answer is that composition, not assignability, is the thing it
-sells.
+sells; `testkit`'s is that an assertion about a `contract` error has to name
+`contract` to make it.
+
+"It is only a test dependency" is likewise not an argument, and `testkit` is
+the reason the sentence is here: a `require` added by a `_test.go` file is a
+`require` like any other, counted by `go list -m all` and by the gate.

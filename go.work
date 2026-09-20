@@ -12,6 +12,7 @@ use (
 	./logging
 	./resilience
 	./telemetry
+	./testkit
 )
 
 replace (
@@ -24,4 +25,5 @@ replace (
 	github.com/pavelpascari/svcrt/logging v0.0.0 => ./logging
 	github.com/pavelpascari/svcrt/resilience v0.0.0 => ./resilience
 	github.com/pavelpascari/svcrt/telemetry v0.0.0 => ./telemetry
+	github.com/pavelpascari/svcrt/testkit v0.0.0 => ./testkit
 )

@@ -11,22 +11,15 @@ import (
 	"github.com/pavelpascari/svcrt/httpclient"
 	"github.com/pavelpascari/svcrt/resilience"
 	"github.com/pavelpascari/svcrt/telemetry"
+	"github.com/pavelpascari/svcrt/testkit"
 )
 
-// flakyUpstream fails with 503 for the first n requests, then returns 200.
-// 503 is in resilience's default retry set.
-func flakyUpstream(t *testing.T, n int) (*httptest.Server, *atomic.Int32) {
-	t.Helper()
-	var hits atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if hits.Add(1) <= int32(n) {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(srv.Close)
-	return srv, &hits
+// flaky is the script this module is exercised against: 503 twice, then 200.
+// 503 is in resilience's default retry set, so a three-attempt policy sees
+// exactly three upstream requests. testkit.Upstream repeats its last response,
+// so the 200 also answers any request after the third.
+func flaky() []testkit.Response {
+	return []testkit.Response{testkit.Status(503), testkit.Status(503), testkit.Status(200)}
 }
 
 // fastRetry keeps the suite quick without changing what is under test. The
@@ -40,7 +33,7 @@ func fastRetry() resilience.Policy {
 // collapse into one span and the retries become invisible -- which is the
 // opposite of what you instrumented for, and nothing errors either way.
 func TestNewClientRecordsOneSpanPerAttempt(t *testing.T) {
-	up, hits := flakyUpstream(t, 2)
+	up := testkit.Upstream(t, flaky()...)
 	tp := &countingTracerProvider{}
 
 	c := NewClient(ClientOptions{
@@ -48,13 +41,13 @@ func TestNewClientRecordsOneSpanPerAttempt(t *testing.T) {
 		Telemetry: telemetry.Options{TracerProvider: tp},
 	})
 
-	resp, err := c.Get(up.URL)
+	resp, err := c.Get(up.URL())
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 
-	if got := hits.Load(); got != 3 {
+	if got := up.Requests(); got != 3 {
 		t.Fatalf("upstream saw %d requests, want 3", got)
 	}
 	if got := tp.spans(); got != 3 {
@@ -66,7 +59,7 @@ func TestNewClientRecordsOneSpanPerAttempt(t *testing.T) {
 // middleware is typically per-attempt work -- a fresh auth token, a signature.
 // Outside Retry it would run once and be replayed stale on attempts 2 and 3.
 func TestCallerMiddlewareRunsOncePerAttempt(t *testing.T) {
-	up, _ := flakyUpstream(t, 2)
+	up := testkit.Upstream(t, flaky()...)
 	var calls atomic.Int32
 
 	c := NewClient(ClientOptions{
@@ -81,7 +74,7 @@ func TestCallerMiddlewareRunsOncePerAttempt(t *testing.T) {
 		},
 	})
 
-	resp, err := c.Get(up.URL)
+	resp, err := c.Get(up.URL())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +89,7 @@ func TestCallerMiddlewareRunsOncePerAttempt(t *testing.T) {
 // the chain that HTTP.Middleware would otherwise occupy, and silently dropping
 // it is exactly the failure this module exists to prevent.
 func TestCallerMiddlewareIsNotDiscarded(t *testing.T) {
-	up, _ := flakyUpstream(t, 0)
+	up := testkit.Upstream(t, testkit.Status(200))
 	var ran atomic.Bool
 
 	c := NewClient(ClientOptions{
@@ -110,7 +103,7 @@ func TestCallerMiddlewareIsNotDiscarded(t *testing.T) {
 		},
 	})
 
-	resp, err := c.Get(up.URL)
+	resp, err := c.Get(up.URL())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,9 +117,9 @@ func TestCallerMiddlewareIsNotDiscarded(t *testing.T) {
 // TestZeroClientOptionsIsAWorkingStack: the zero value must be a complete
 // production stack, with no SDK installed.
 func TestZeroClientOptionsIsAWorkingStack(t *testing.T) {
-	up, hits := flakyUpstream(t, 0)
+	up := testkit.Upstream(t, testkit.Status(200))
 
-	resp, err := NewClient(ClientOptions{}).Get(up.URL)
+	resp, err := NewClient(ClientOptions{}).Get(up.URL())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +128,7 @@ func TestZeroClientOptionsIsAWorkingStack(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d", resp.StatusCode)
 	}
-	if got := hits.Load(); got != 1 {
+	if got := up.Requests(); got != 1 {
 		t.Errorf("upstream saw %d requests, want 1", got)
 	}
 }
@@ -144,7 +137,7 @@ func TestZeroClientOptionsIsAWorkingStack(t *testing.T) {
 // defaulting that go-mutesting does not mutate (carried from R2 and R3). Each
 // field gets a distinct observable effect.
 func TestEveryClientOptionLandsOnItsOwnDestination(t *testing.T) {
-	up, hits := flakyUpstream(t, 2)
+	up := testkit.Upstream(t, flaky()...)
 	tp := &countingTracerProvider{}
 	var mwRan atomic.Bool
 
@@ -164,13 +157,13 @@ func TestEveryClientOptionLandsOnItsOwnDestination(t *testing.T) {
 		},
 	})
 
-	resp, err := c.Get(up.URL)
+	resp, err := c.Get(up.URL())
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 
-	if got := hits.Load(); got != 3 {
+	if got := up.Requests(); got != 3 {
 		t.Errorf("ClientOptions.Retry did not reach the retry loop: %d attempts", got)
 	}
 	if got := tp.spans(); got == 0 {
@@ -190,17 +183,19 @@ func TestEveryClientOptionLandsOnItsOwnDestination(t *testing.T) {
 // to be enforced proves the whole of o.HTTP reaches httpclient.New, not just
 // the one field the chain is built from.
 func TestClientOptionsHTTPTimeoutReachesHttpclientNew(t *testing.T) {
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// testkit.Upstream serves a script, not a delay, so this one stays
+	// hand-rolled: a slow upstream is not something testkit covers.
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(50 * time.Millisecond)
 		w.WriteHeader(http.StatusOK)
 	}))
-	t.Cleanup(up.Close)
+	t.Cleanup(slow.Close)
 
 	c := NewClient(ClientOptions{
 		HTTP: httpclient.Options{Timeout: 5 * time.Millisecond},
 	})
 
-	if _, err := c.Get(up.URL); err == nil {
+	if _, err := c.Get(slow.URL); err == nil {
 		t.Fatal("expected a timeout error, got nil -- ClientOptions.HTTP.Timeout did not reach httpclient.New")
 	}
 }
@@ -209,25 +204,25 @@ func TestClientOptionsHTTPTimeoutReachesHttpclientNew(t *testing.T) {
 // one three-attempt burst would trip a threshold-2 breaker even though the
 // call ultimately succeeded.
 func TestNewClientBreakerSitsOutsideRetry(t *testing.T) {
-	up, hits := flakyUpstream(t, 2) // fails twice, then succeeds
+	up := testkit.Upstream(t, flaky()...) // fails twice, then succeeds
 
 	c := NewClient(ClientOptions{
 		Retry:   fastRetry(),
 		Breaker: resilience.BreakerPolicy{FailureThreshold: 2},
 	})
 
-	resp, err := c.Get(up.URL)
+	resp, err := c.Get(up.URL())
 	if err != nil {
 		t.Fatalf("the retried call failed; the breaker counted attempts, not calls: %v", err)
 	}
 	resp.Body.Close()
 
-	if got := hits.Load(); got != 3 {
+	if got := up.Requests(); got != 3 {
 		t.Fatalf("upstream saw %d requests, want 3", got)
 	}
 
 	// The call succeeded, so the breaker must still be closed.
-	resp, err = c.Get(up.URL)
+	resp, err = c.Get(up.URL())
 	if err != nil {
 		t.Fatalf("breaker opened after a call that succeeded: %v", err)
 	}
@@ -236,10 +231,7 @@ func TestNewClientBreakerSitsOutsideRetry(t *testing.T) {
 
 // TestNewClientBreakerOpensOnSustainedFailure: the breaker is on by default.
 func TestNewClientBreakerOpensOnSustainedFailure(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
+	up := testkit.Upstream(t, testkit.Status(500))
 
 	c := NewClient(ClientOptions{
 		Retry:   resilience.Policy{MaxAttempts: 1},
@@ -247,13 +239,13 @@ func TestNewClientBreakerOpensOnSustainedFailure(t *testing.T) {
 	})
 
 	for range 2 {
-		resp, err := c.Get(srv.URL)
+		resp, err := c.Get(up.URL())
 		if err != nil {
 			t.Fatal(err)
 		}
 		resp.Body.Close()
 	}
-	if _, err := c.Get(srv.URL); !errors.Is(err, resilience.ErrOpen) {
+	if _, err := c.Get(up.URL()); !errors.Is(err, resilience.ErrOpen) {
 		t.Fatalf("error = %v, want ErrOpen", err)
 	}
 }
@@ -261,10 +253,7 @@ func TestNewClientBreakerOpensOnSustainedFailure(t *testing.T) {
 // TestDisableBreakerRemovesItEntirely. The negative flag exists because no
 // zero value of BreakerPolicy can mean "no breaker at all".
 func TestDisableBreakerRemovesItEntirely(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
+	up := testkit.Upstream(t, testkit.Status(500))
 
 	c := NewClient(ClientOptions{
 		Retry:          resilience.Policy{MaxAttempts: 1},
@@ -273,7 +262,7 @@ func TestDisableBreakerRemovesItEntirely(t *testing.T) {
 	})
 
 	for i := range 5 {
-		resp, err := c.Get(srv.URL)
+		resp, err := c.Get(up.URL())
 		if err != nil {
 			t.Fatalf("request %d refused with the breaker disabled: %v", i, err)
 		}
