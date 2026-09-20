@@ -9,6 +9,13 @@ examples/*/*
 !examples/*/go.mod
 !examples/*/go.sum
 
+# The same binary, built from the REPO ROOT. `go build ./examples/orders`
+# writes ./orders here, not next to the package -- which is how a 10MB
+# executable was committed in R5 and survived every gate until someone read
+# the file list. Root-anchored so the examples/orders DIRECTORY is unaffected.
+/orders
+/worker
+
 # Test coverage artifacts
 coverage.out
 coverage.html

@@ -38,6 +38,16 @@ done
 # SIBLING_ALLOWED is shaped "<module>=<why>" for the same reason DEP_EXEMPT
 # and COUNT_EXEMPT are: once a list is just names, "someone forgot" and
 # "someone decided" become indistinguishable.
+# Tracked files that are legitimately binary, shaped "<path>=<why>" for the
+# same reason DEP_EXEMPT, COUNT_EXEMPT and SIBLING_ALLOWED are: once a list is
+# just paths, "someone forgot" and "someone decided" become indistinguishable.
+#
+# Empty is the healthy state. A Go library repo has no reason to track an
+# executable, and R5 committed a 10MB one -- ./orders, from `go build
+# ./examples/orders` run at the root -- which survived every gate until a
+# human read the file list.
+BINARY_ALLOWED=()
+
 SIBLING_ALLOWED=(
   "kit=composes httpclient, resilience, telemetry and logging into the orderings R5 proved fail silently when inverted; a composition module cannot compose without importing what it composes. It is opt-in and nothing imports it, so the coupling is paid only by callers who asked for it"
   "testkit=ships test helpers for CONSUMERS of svcrt, and cannot assert on a contract error or capture a logging record without importing contract and logging. It is opt-in, nothing in svcrt imports it, and no core module may -- a test-only require is still a require, so a core module adopting testkit would fail the zero-requires gate above (conventions.md §11)"

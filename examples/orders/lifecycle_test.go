@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/pavelpascari/svcrt/httpserver"
-	"github.com/pavelpascari/svcrt/lifecycle"
 )
 
 func status(t *testing.T, url string) int {
@@ -31,11 +30,12 @@ func status(t *testing.T, url string) int {
 // from buildStack, the same function main() calls, so a regression in that
 // wiring is visible here rather than only in a running process.
 type stack struct {
-	lc       *lifecycle.Lifecycle
-	health   *httpserver.Health
-	api      *httpserver.Server
-	admin    *httpserver.Server
-	pricing  *PricingClient
+	// Embedded rather than re-declared: lc, health, api, admin and pricing
+	// were listed here and copied across one by one, which is five field
+	// declarations and five assignments that say nothing. Promotion keeps
+	// s.lc and s.admin reading identically at every call site.
+	*appStack
+
 	mu       sync.Mutex
 	ops      []string
 	slowGate chan struct{}
@@ -65,11 +65,7 @@ func newStack(t *testing.T, drainDelay time.Duration, pricingURL string) *stack 
 			s.mu.Unlock()
 		},
 	})
-	s.lc = built.lc
-	s.health = built.health
-	s.api = built.api
-	s.admin = built.admin
-	s.pricing = built.pricing
+	s.appStack = built
 
 	return s
 }

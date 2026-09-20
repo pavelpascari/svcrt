@@ -127,6 +127,32 @@ done
 grep -q '^go 1\.22$' contract/go.mod ||
   fail "contract/go.mod no longer declares 'go 1.22'; that floor is a deliberate compatibility commitment for the one module that freezes (spec §4). If raising it is intended, change it here too."
 
+# No tracked file may be an executable.
+#
+# R5 committed a 10MB Mach-O binary at the repo root and it survived coverage,
+# mutation, race detection and nine milestones of review -- because every gate
+# this repo has inspects Go code, and nothing looked at what was in the tree.
+#
+# Checked by content rather than by name: a .gitignore entry only catches the
+# build output someone already thought of, and the next one will have a
+# different name.
+command -v file >/dev/null ||
+  fail "the 'file' command is unavailable, so the tracked-binary check cannot run; install it rather than skipping the check"
+
+while IFS= read -r tracked; do
+  [ -f "$tracked" ] || continue
+  case "$(file -b --mime-type "$tracked")" in
+    application/x-mach-binary|application/x-executable|application/x-sharedlib|application/x-pie-executable)
+      allowed=false
+      for e in ${BINARY_ALLOWED[@]+"${BINARY_ALLOWED[@]}"}; do
+        [ "${e%%=*}" = "$tracked" ] && allowed=true
+      done
+      $allowed ||
+        fail "$tracked is a tracked executable ($(ls -lh "$tracked" | awk '{print $5}')). Build output does not belong in git: 'git rm --cached $tracked' and add it to .gitignore. If it genuinely must be tracked, add it to BINARY_ALLOWED in scripts/lib.sh with the reason."
+      ;;
+  esac
+done < <(git ls-files)
+
 # Every Example function must carry an "// Output:" (or "// Unordered output:")
 # comment.
 #
