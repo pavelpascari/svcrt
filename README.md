@@ -1,8 +1,16 @@
 # svcrt
 
 Small, independent Go libraries for building services. Each module compiles
-and is useful on its own, depends on nothing outside the standard library, and
-never owns your process — you write `main()`.
+and is useful on its own, and none of them owns your process — you write
+`main()`.
+
+**Seven of the ten are stdlib-only.** `contract`, `config`, `logging`,
+`lifecycle`, `httpserver`, `httpclient` and `resilience` have zero `require`
+directives, asserted in CI rather than promised, so adopting one costs you
+nothing. Three are documented exceptions: `telemetry` depends on the
+OpenTelemetry API (never the SDK), and `kit` and `testkit` import siblings
+because composing and testing svcrt is their entire job. Both kinds are
+opt-in, and `docs/conventions.md` §11 argues each.
 
 `svcrt` is the runtime half of a two-repo design. The generator half,
 `svcgen`, is build-time only and never appears in a service's `go.mod`.
@@ -49,6 +57,39 @@ func main() {
 
 See `examples/orders` for a complete service, and `examples/worker` for a
 background process with no application HTTP surface.
+
+## Composition order
+
+Middleware order is load-bearing in four places, and **every one of them fails
+silently when inverted** — no error, no warning, just observability that
+quietly stops working. Each has a test that fails if the order is wrong; this
+is the summary.
+
+```go
+// server: Recover innermost, so the 500 it writes is seen by everything outside
+h := httpserver.Chain(
+    telemetry.Server(telemetry.Options{}),  // span exists before the log line
+    httpserver.AccessLog(log),
+    httpserver.Recover(log),                // innermost
+)(mux)
+
+// client: Breaker outside Retry, telemetry inside it
+c := kit.NewClient(kit.ClientOptions{})     // does exactly this, correctly
+
+// logger: without the extractor, spans and metrics are right and logs are uncorrelated
+log := kit.NewLogger(os.Stdout, kit.LoggerOptions{})
+```
+
+| get this wrong | what breaks |
+|---|---|
+| `telemetry.Server` inside `AccessLog` | the access line loses **both** its `trace_id` and its route — `Server` rebinds the request, and `ServeMux` records the pattern on the rebound one |
+| `Recover` outside `AccessLog` | a panic unwinds inner defers first, so the line is written before the 500 exists and records no status at all |
+| `telemetry.Client` outside `Retry` | three attempts collapse into one span; the retries become invisible |
+| a logger built without `telemetry.LogExtractor` | correct spans, correct metrics, and logs you cannot pivot from |
+
+`kit` exists so you do not have to remember any of this — it encodes all four
+and is tested against each inversion. Reach for the raw modules when you
+outgrow its defaults, and consult this table when you do.
 
 ## Documentation
 
@@ -99,9 +140,12 @@ depend on; CI detects that from disk and runs those with the workspace instead.
 
 ## Status
 
-R8. All ten modules are implemented: `contract`, `config`, `logging`,
+R9. All ten modules are implemented: `contract`, `config`, `logging`,
 `lifecycle`, `httpserver`, `httpclient`, `resilience`, `telemetry`, `kit` and
 `testkit`. `testkit` was the last one still listed as planned; R8 shipped it.
+R9 added panic recovery, runnable examples, and the CI workflows that run the
+gates this repo already had — until then `scripts/ci.sh` had only ever run in
+a developer's shell.
 
 **Nothing is tagged yet.** `git tag` is empty, which is why `kit`, `testkit`
 and the exemplars require their siblings at `v0.0.0` and resolve through
