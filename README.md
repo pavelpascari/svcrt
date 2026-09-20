@@ -50,6 +50,27 @@ func main() {
 See `examples/orders` for a complete service, and `examples/worker` for a
 background process with no application HTTP surface.
 
+## Documentation
+
+```sh
+go doc ./resilience                    # package synopsis
+go doc ./resilience Breaker            # one symbol
+./scripts/docs.sh                      # browse everything at localhost:8080
+```
+
+`go doc` needs nothing and is the answer for a single lookup. `scripts/docs.sh`
+runs `pkgsite` against the workspace and renders every module the way
+pkg.go.dev does; it prints the one-line install command if `pkgsite` is absent.
+
+Every module ships `Example` functions, and they are documentation that cannot
+rot: an example with an `// Output:` comment is **executed** by `go test` and
+its output compared, so a signature change or a behaviour change breaks the
+build rather than leaving a stale code block behind.
+
+```sh
+cd resilience && go test ./... -run Example -v
+```
+
 ## Development
 
 ```sh
