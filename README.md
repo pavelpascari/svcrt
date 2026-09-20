@@ -16,6 +16,34 @@ and `docs/conventions.md` §11 argues each one.
 `svcrt` is the runtime half of a two-repo design. The generator half,
 `svcgen`, is build-time only and never appears in a service's `go.mod`.
 
+## Start here
+
+- **Building your first service?** Follow the [quick start](#quick-start), then
+  use the [runtime guide](docs/runtime-guide.md) for clients, retries,
+  dependency ordering, health checks and tests.
+- **Looking for a complete application?** [`examples/orders`](examples/orders)
+  is an HTTP API with an upstream dependency;
+  [`examples/worker`](examples/worker) is a background process with probes but
+  no application listener.
+- **Looking up one API?** The [module table](#modules) points to each package's
+  main entry point. Every package also ships executable examples visible in
+  `go doc` and on pkg.go.dev.
+
+The repository has not published its first per-module tags yet. To try the
+current revision in another module, select only the packages you need:
+
+```sh
+go get github.com/pavelpascari/svcrt/config@main \
+       github.com/pavelpascari/svcrt/httpserver@main \
+       github.com/pavelpascari/svcrt/lifecycle@main \
+       github.com/pavelpascari/svcrt/logging@main \
+       github.com/pavelpascari/svcrt/telemetry@main
+```
+
+For a reproducible build, commit the resulting `go.mod` and `go.sum`; Go records
+an immutable pseudo-version rather than a moving `main` reference. Once module
+tags are published, use the release tag instead.
+
 ## Modules
 
 Each module is its own Go module under `github.com/pavelpascari/svcrt/`, so you
@@ -56,7 +84,6 @@ import (
 
 	"github.com/pavelpascari/svcrt/config"
 	"github.com/pavelpascari/svcrt/httpserver"
-	"github.com/pavelpascari/svcrt/kit"
 	"github.com/pavelpascari/svcrt/lifecycle"
 	"github.com/pavelpascari/svcrt/logging"
 	"github.com/pavelpascari/svcrt/telemetry"
@@ -75,11 +102,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// kit.NewLogger wires telemetry.LogExtractor, so every line inside a
-	// request carries trace_id. logging.New alone would not.
-	log := kit.NewLogger(os.Stdout, kit.LoggerOptions{
-		Logging: logging.Options{Level: slog.LevelInfo},
-	})
+	// The extractor makes every line logged with a request context carry its
+	// trace_id. logging.New alone deliberately knows nothing about tracing.
+	log := logging.New(
+		os.Stdout,
+		logging.Options{Level: slog.LevelInfo},
+		telemetry.LogExtractor(),
+	)
 	log.Info("starting", "addr", cfg.Addr, "db", cfg.DBURL) // db redacts
 
 	mux := http.NewServeMux()
@@ -132,6 +161,10 @@ so it does not grow a distinct value per order id.
 See `examples/orders` for a service with an upstream client, a circuit breaker
 and a dependency-ordered store, and `examples/worker` for a background process
 with no application HTTP surface.
+
+The [runtime guide](docs/runtime-guide.md) builds on this example with focused,
+copyable recipes for adding dependencies, outbound clients, readiness checks,
+configuration tests and service tests.
 
 ## Health probes and the admin surface
 
